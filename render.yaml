@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: email-automation-tool
+    runtime: docker
+    plan: free
+    healthCheckPath: /
+    envVars:
+      - key: PORT
+        value: 8000
