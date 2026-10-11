@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Connect email account</h1>
+<div class="grid2">
+<form method="post" action="/accounts" class="form">
+<label>Label <input type="text" name="label" required placeholder="e.g. Moiz Gmail"></label>
+<label>Email address <input type="email" name="email" required placeholder="you@gmail.com"></label>
+<h3>Sending (SMTP) <span class="tip" title="SMTP = the protocol that SENDS your emails out.">?</span></h3>
+<div class="grid2">
+<label>SMTP host <input type="text" name="smtp_host" value="smtp.gmail.com" required></label>
+<label>SMTP port <input type="number" name="smtp_port" value="587" required></label>
+</div>
+<div class="grid2">
+<label>SMTP username <input type="text" name="smtp_user" required placeholder="usually your email"></label>
+<label>Password / App Password <input type="password" name="smtp_pass" required autocomplete="new-password"></label>
+</div>
+<label>Encryption <select name="smtp_enc"><option>STARTTLS</option><option>SSL</option><option>NONE</option></select></label>
+<h3>Receiving (IMAP) <span class="tip" title="IMAP = the protocol that READS your inbox, so the tool can detect replies.">?</span></h3>
+<div class="grid2">
+<label>IMAP host <input type="text" name="imap_host" value="imap.gmail.com" required></label>
+<label>IMAP port <input type="number" name="imap_port" value="993" required></label>
+</div>
+<div class="grid2">
+<label>IMAP username <input type="text" name="imap_user" required placeholder="usually your email"></label>
+<label>Password / App Password <input type="password" name="imap_pass" required autocomplete="new-password"></label>
+</div>
+<label>Encryption <select name="imap_enc"><option>SSL</option><option>STARTTLS</option><option>NONE</option></select></label>
+<button class="btn primary">💾 Save account</button>
+</form>
+<div class="card">
+<h3>How to get a Gmail App Password</h3>
+<ol>
+<li>Go to <strong>myaccount.google.com → Security</strong></li>
+<li>Turn on <strong>2-Step Verification</strong> (required)</li>
+<li>Open <strong>App passwords</strong> → create one named "Email Tool"</li>
+<li>Google shows a 16-letter code — paste it above as the password (both SMTP and IMAP)</li>
+</ol>
+<p class="muted">Your normal Gmail password will NOT work — Google blocks it. The App Password is stored encrypted on this server only.</p>
+<h3>Outlook / Microsoft 365</h3>
+<p class="muted">SMTP: smtp.office365.com:587 (STARTTLS) · IMAP: outlook.office365.com:993 (SSL). Use an App Password if 2FA is on.</p>
+<h3>Deliverability basics</h3>
+<p class="muted">Before your first campaign, the pre-launch checklist verifies your domain's
+<span class="tip" title="SPF = a DNS record listing which servers may send email for your domain.">?</span> SPF,
+<span class="tip" title="DKIM = a cryptographic signature proving your emails weren't tampered with.">?</span> DKIM and
+<span class="tip" title="DMARC = a policy telling inbox providers what to do with mail that fails SPF/DKIM.">?</span> DMARC.
+Your domain host (or Google Workspace / Microsoft 365 admin) can add these records.</p>
+</div>
+</div>
+{% endblock %}

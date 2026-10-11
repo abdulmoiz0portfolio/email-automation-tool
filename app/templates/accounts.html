@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row-between"><h1>Email accounts</h1><a class="btn primary" href="/accounts/new">+ Connect account</a></div>
+<table><tr><th>Label</th><th>Email</th><th>Health</th><th>Last tested</th><th></th></tr>
+{% for a in accounts %}
+<tr><td><strong>{{ a.label }}</strong></td><td>{{ a.email }}</td>
+<td><span class="pill {{ a.status }}">{{ a.status }}</span>{% if a.last_error %}<div class="err">{{ a.last_error[:120] }}</div>{% endif %}</td>
+<td class="muted">{{ (a.last_tested_at or '')[:16].replace('T',' ') }}</td>
+<td>
+<form method="post" action="/accounts/{{ a.id }}/test" style="display:inline"><button class="btn small">🔌 Test connection</button></form>
+{% if a.warm_active %}<form method="post" action="/accounts/{{ a.id }}/warmup-override" style="display:inline" onsubmit="return confirm('Override warm-up? New accounts should ramp slowly to protect deliverability.');"><button class="btn small">Override warm-up</button></form>{% endif %}
+<form method="post" action="/accounts/{{ a.id }}/delete" style="display:inline" onsubmit="return confirm('Delete this account? Campaigns using it will stop sending.');"><button class="btn danger small">Delete</button></form>
+</td></tr>
+{% else %}<tr><td colspan="5" class="muted">No accounts connected.</td></tr>{% endfor %}
+</table>
+{% endblock %}

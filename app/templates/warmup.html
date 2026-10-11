@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Override warm-up for {{ a.label }}</h1>
+<div class="card">
+<p>New accounts are capped at <strong>20/day, +10/day</strong> to protect deliverability.
+Overriding removes this protection — sudden high volume from a fresh account can get it flagged as spam.</p>
+<form method="post" action="/accounts/{{ a.id }}/warmup-override">
+<label>Type <code>I UNDERSTAND</code> to confirm <input type="text" name="confirm" required autocomplete="off"></label>
+<button class="btn danger">Override warm-up</button>
+<a class="btn" href="/accounts">Cancel</a>
+</form>
+</div>
+{% endblock %}

@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# App data - NEVER commit (contains DB + encryption keys)
+data/
+*.db
+*.db-shm
+*.db-wal
+.key
+
+# Uploads
+uploads/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/

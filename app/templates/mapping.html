@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Map your columns → our fields</h1>
+<p class="muted">File: <strong>{{ filename }}</strong> · {{ nrows }} rows. <strong>Email is required</strong> — rows without a valid email go to the Invalid list, not deleted.</p>
+<form method="post" action="/contacts/mapping/{{ upload_id }}">
+<table><tr><th>Your column</th><th>Sample value</th><th>Map to</th></tr>
+{% for col in columns %}
+<tr><td><code>{{ col }}</code></td><td class="muted">{{ samples[col] }}</td>
+<td><select name="map_{{ loop.index0 }}">
+<option value="">— ignore —</option>
+{% for f,label in fields %}<option value="{{ f }}" {% if guess[col]==f %}selected{% endif %}>{{ label }}</option>{% endfor %}
+</select></td></tr>
+{% endfor %}
+</table>
+<label>List name <input type="text" name="list_name" value="{{ list_name }}" required></label>
+<button class="btn primary">Import list</button>
+</form>
+{% endblock %}

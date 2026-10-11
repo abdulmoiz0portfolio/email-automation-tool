@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ "New draft" if not draft else "Edit draft — "+draft.name }}</h1>
+{% if draft %}<p class="muted">Editing creates <strong>version {{ draft.version+1 }}</strong>. Running campaigns keep the old version unless you switch them.</p>{% endif %}
+<form method="post" action="{{ '/drafts' if not draft else '/drafts/%d'%draft.id }}" class="form">
+<label>Draft name <input type="text" name="name" value="{{ draft.name if draft }}" required placeholder="e.g. Realtor cold outreach v1"></label>
+<label>Subject <input type="text" name="subject" id="subject" value="{{ draft.subject if draft }}" required placeholder="Quick question, {{first_name}}"></label>
+<label>Body <span class="muted">— click a variable to insert it at the cursor</span></label>
+<div class="varbar">
+{% for v in ['first_name','last_name','company','email','custom_1','custom_2','custom_3'] %}
+<button type="button" class="btn small varbtn" data-var="{{ v }}">&#123;&#123;{{ v }}&#125;&#125;</button>
+{% endfor %}
+</div>
+<div class="toolbar">
+<button type="button" data-cmd="bold"><b>B</b></button>
+<button type="button" data-cmd="italic"><i>I</i></button>
+<button type="button" data-cmd="insertUnorderedList">• List</button>
+<button type="button" data-cmd="createLink">🔗</button>
+</div>
+<div id="editor" contenteditable="true" class="editor">{{ (draft.body_html if draft)|safe }}</div>
+<input type="hidden" name="body_html" id="body_html">
+<div class="grid2">
+<div class="card"><h3>Live preview</h3>
+<label>Preview as <select id="prev_contact">{% for c in sample_contacts %}<option value="{{ c.id }}">{{ c.first_name }} {{ c.last_name }} ({{ c.email }})</option>{% endfor %}</select></label>
+<div class="preview-subject" id="prev_subject"></div>
+<div class="preview-body" id="prev_body"></div>
+</div>
+<div class="card"><h3>Version history</h3>
+{% if versions %}<ul>{% for v in versions %}<li>v{{ v.version }} — {{ v.created_at[:16].replace('T',' ') }}</li>{% endfor %}</ul>
+{% else %}<p class="muted">First version.</p>{% endif %}</div>
+</div>
+<button class="btn primary">💾 Save {{ "new version" if draft else "draft" }}</button>
+</form>
+{% endblock %}
+{% block scripts %}
+<script>
+const editor=document.getElementById('editor');
+document.querySelectorAll('.toolbar button').forEach(b=>b.onclick=()=>{
+ const cmd=b.dataset.cmd;
+ if(cmd==='createLink'){const u=prompt('Link URL:');if(u)document.execCommand(cmd,false,u);}
+ else document.execCommand(cmd,false,null);editor.focus();
+});
+document.querySelectorAll('.varbtn').forEach(b=>b.onclick=()=>{
+ editor.focus();document.execCommand('insertText',false,'{{'+b.dataset.var+'}}');
+});
+function sync(){document.getElementById('body_html').value=editor.innerHTML;
+ const cid=document.getElementById('prev_contact').value;
+ fetch(`/api/drafts/preview?subject=${encodeURIComponent(document.getElementById('subject').value)}&body=${encodeURIComponent(editor.innerHTML)}&contact_id=${cid}`)
+ .then(r=>r.json()).then(j=>{document.getElementById('prev_subject').textContent=j.subject;document.getElementById('prev_body').innerHTML=j.body;});
+}
+document.getElementById('subject').addEventListener('input',sync);
+editor.addEventListener('input',sync);
+document.getElementById('prev_contact').addEventListener('change',sync);
+document.querySelector('form').addEventListener('submit',()=>{document.getElementById('body_html').value=editor.innerHTML;});
+sync();
+</script>
+{% endblock %}

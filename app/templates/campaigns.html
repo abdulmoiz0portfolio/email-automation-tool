@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row-between">
+<h1>Campaigns</h1>
+<a class="btn primary" href="/campaigns/new">+ New campaign</a>
+</div>
+<table>
+<tr><th>Name</th><th>List</th><th>Account</th><th>Status</th><th>Sent</th><th>Replies</th><th></th></tr>
+{% for c in campaigns %}
+<tr>
+  <td><a href="/campaigns/{{ c.id }}">{{ c.name }}</a></td>
+  <td>{{ c.list_name }}</td><td>{{ c.account_label }}</td>
+  <td><span class="pill {{ c.status }}">{{ c.status }}</span></td>
+  <td>{{ c.sent }}</td><td>{{ c.replies }}</td>
+  <td><a href="/campaigns/{{ c.id }}">Open</a></td>
+</tr>
+{% else %}
+<tr><td colspan="7" class="muted">No campaigns yet.</td></tr>
+{% endfor %}
+</table>
+{% endblock %}

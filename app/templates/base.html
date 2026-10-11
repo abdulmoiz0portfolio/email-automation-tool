@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title or "Email Tool" }} — Automatixes Email Automation</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="layout">
+<aside class="sidebar">
+  <div class="brand">📧 Email Tool</div>
+  <nav>
+    <a href="/" class="{{ 'active' if active=='dashboard' }}">Dashboard</a>
+    <a href="/campaigns" class="{{ 'active' if active=='campaigns' }}">Campaigns</a>
+    <a href="/contacts" class="{{ 'active' if active=='contacts' }}">Contacts</a>
+    <a href="/drafts" class="{{ 'active' if active=='drafts' }}">Drafts</a>
+    <a href="/accounts" class="{{ 'active' if active=='accounts' }}">Accounts</a>
+    <a href="/suppression" class="{{ 'active' if active=='suppression' }}">Suppression List</a>
+    <a href="/settings" class="{{ 'active' if active=='settings' }}">Settings</a>
+  </nav>
+  <div class="sidefoot">Automatixes · self-hosted</div>
+</aside>
+<main>
+{% if paused_campaigns %}
+<div class="banner warn">
+  ⏸ Paused: {% for c in paused_campaigns %}<strong>{{ c.name }}</strong> — {{ c.pause_reason or "paused" }}{% if not loop.last %} · {% endif %}{% endfor %}
+</div>
+{% endif %}
+{% if flash %}
+<div class="banner {{ flash_kind or 'info' }}">{{ flash }}</div>
+{% endif %}
+{% block content %}{% endblock %}
+</main>
+</div>
+<script src="/static/app.js"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

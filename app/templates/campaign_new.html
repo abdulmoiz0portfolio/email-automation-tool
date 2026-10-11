@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>New campaign</h1>
+<form id="wizard" method="post" action="/campaigns">
+<div class="steps">
+  <div class="step active" data-step="1">1 · List</div>
+  <div class="step" data-step="2">2 · Account</div>
+  <div class="step" data-step="3">3 · Draft</div>
+  <div class="step" data-step="4">4 · Schedule &amp; Pace</div>
+  <div class="step" data-step="5">5 · Review</div>
+</div>
+
+<div class="wstep" data-step="1">
+  <h2>Pick a contact list</h2>
+  {% for l in lists %}
+  <label class="radio-card"><input type="radio" name="list_id" value="{{ l.id }}" required>
+    <strong>{{ l.name }}</strong> <span class="muted">({{ l.count }} contacts, uploaded {{ l.created_at[:10] }})</span></label>
+  {% else %}<p class="muted">No lists yet — <a href="/contacts">upload one first</a>.</p>{% endfor %}
+</div>
+
+<div class="wstep hidden" data-step="2">
+  <h2>Pick the sending account</h2>
+  {% for a in accounts %}
+  <label class="radio-card"><input type="radio" name="account_id" value="{{ a.id }}" required>
+    <strong>{{ a.label }}</strong> <span class="muted">{{ a.email }}</span>
+    <span class="pill {{ a.status }}">{{ a.status }}</span>
+    {% if a.warming %}<span class="muted">· 🔥 warm-up: {{ a.warm_cap }}/day</span>{% endif %}</label>
+  {% else %}<p class="muted">No accounts — <a href="/accounts">connect one first</a>.</p>{% endfor %}
+</div>
+
+<div class="wstep hidden" data-step="3">
+  <h2>Pick the draft</h2>
+  {% for d in drafts %}
+  <label class="radio-card"><input type="radio" name="draft_id" value="{{ d.id }}" required>
+    <strong>{{ d.name }}</strong> <span class="muted">v{{ d.version }} · {{ d.subject }}</span></label>
+  {% else %}<p class="muted">No drafts — <a href="/drafts">write one first</a>.</p>{% endfor %}
+  <details><summary>A/B test (optional)</summary>
+    <label>Second draft <select name="draft_b_id"><option value="">— none —</option>
+      {% for d in drafts %}<option value="{{ d.id }}">{{ d.name }} (v{{ d.version }})</option>{% endfor %}</select></label>
+    <label>A % <input type="number" name="ab_split" value="50" min="10" max="90" style="width:70px"></label>
+  </details>
+</div>
+
+<div class="wstep hidden" data-step="4">
+  <h2>Schedule &amp; pace</h2>
+  <label>Campaign name <input type="text" name="name" required placeholder="e.g. Realtors — March batch"></label>
+  <fieldset><legend>Sending days</legend>
+    {% for i,day in [(0,'Mon'),(1,'Tue'),(2,'Wed'),(3,'Thu'),(4,'Fri'),(5,'Sat'),(6,'Sun')] %}
+    <label class="chk"><input type="checkbox" name="days" value="{{ i }}" {% if i<5 %}checked{% endif %}> {{ day }}</label>
+    {% endfor %}
+  </fieldset>
+  <div class="grid2">
+    <label>Window start <input type="time" name="window_start" value="09:00" required></label>
+    <label>Window end <input type="time" name="window_end" value="17:00" required></label>
+  </div>
+  <div class="grid2">
+    <label>Gap between emails — min (sec) <input type="number" name="gap_min_sec" value="60" min="10" required></label>
+    <label>Gap — max (sec) <input type="number" name="gap_max_sec" value="180" min="10" required></label>
+  </div>
+  <label>Daily cap (emails/day) <input type="number" name="daily_cap" value="80" min="1" max="500" required>
+    <span class="muted">Gmail default 80. Above 150 is risky — you'll see a warning.</span></label>
+  <div class="grid2">
+    <label>Start date <input type="date" name="start_date" value="{{ today }}" required></label>
+    <label>Physical mailing address <input type="text" name="mailing_address" value="{{ physical_address }}" placeholder="Required for the unsubscribe footer"></label>
+  </div>
+</div>
+
+<div class="wstep hidden" data-step="5">
+  <h2>Review before launch</h2>
+  <div id="review" class="card muted">Fill the steps, then come back here.</div>
+  <div id="checklist"></div>
+  <label class="chk"><input type="checkbox" id="launch_ack" required> I understand this will send real emails from my account.</label>
+</div>
+
+<div class="wiz-nav">
+  <button type="button" class="btn" id="prevBtn" disabled>← Back</button>
+  <button type="button" class="btn primary" id="nextBtn">Next →</button>
+  <button type="submit" class="btn primary hidden" id="launchBtn">🚀 Launch campaign</button>
+</div>
+</form>
+{% endblock %}
+{% block scripts %}
+<script>
+const steps=[...document.querySelectorAll('.wstep')];
+const tabs=[...document.querySelectorAll('.step')];
+let cur=0;
+function show(i){cur=i;
+ steps.forEach((s,k)=>s.classList.toggle('hidden',k!==i));
+ tabs.forEach((t,k)=>t.classList.toggle('active',k===i));
+ document.getElementById('prevBtn').disabled=i===0;
+ document.getElementById('nextBtn').classList.toggle('hidden',i===4);
+ document.getElementById('launchBtn').classList.toggle('hidden',i!==4);
+ if(i===4) buildReview();
+}
+document.getElementById('nextBtn').onclick=()=>{
+ if(cur===0&&!document.querySelector('input[name=list_id]:checked'))return alert('Pick a list first.');
+ if(cur===1&&!document.querySelector('input[name=account_id]:checked'))return alert('Pick an account first.');
+ if(cur===2&&!document.querySelector('input[name=draft_id]:checked'))return alert('Pick a draft first.');
+ show(cur+1);
+};
+document.getElementById('prevBtn').onclick=()=>show(cur-1);
+function val(n){const e=document.querySelector(`[name=${n}]`);return e?e.value:'';}
+function buildReview(){
+ const list=document.querySelector('input[name=list_id]:checked');
+ const acc=document.querySelector('input[name=account_id]:checked');
+ const dr=document.querySelector('input[name=draft_id]:checked');
+ const days=[...document.querySelectorAll('input[name=days]:checked')].map(e=>e.parentElement.textContent.trim()).join(', ');
+ const L=list?list.parentElement.querySelector('strong').textContent:'—';
+ const A=acc?acc.parentElement.querySelector('strong').textContent:'—';
+ const D=dr?dr.parentElement.querySelector('strong').textContent:'—';
+ const cap=+val('daily_cap'), gmin=+val('gap_min_sec'), gmax=+val('gap_max_sec');
+ document.getElementById('review').innerHTML=
+ `<p>You are about to send from <strong>${A}</strong> to list <strong>${L}</strong> using draft <strong>${D}</strong>.</p>
+  <p>Days: <strong>${days}</strong> · Window: <strong>${val('window_start')}–${val('window_end')}</strong><br>
+  Gap: <strong>${gmin}–${gmax}s</strong> between emails · Daily cap: <strong>${cap}</strong>${cap>150?' ⚠️ <b>above 150 — risky for deliverability</b>':''}</p>
+  <p class="muted">Every email gets a one-click unsubscribe link + your mailing address in the footer. Suppressed contacts are skipped automatically.</p>`;
+ fetch(`/api/checklist?account_id=${acc?acc.value:''}`).then(r=>r.json()).then(j=>{
+  document.getElementById('checklist').innerHTML='<h3>Pre-launch deliverability checklist</h3><ul class="checklist">'+
+   j.items.map(i=>`<li class="${i.status}">${i.status==='pass'?'✅':i.status==='fail'?'❌':'❔'} <strong>${i.label}</strong> — ${i.detail}</li>`).join('')+'</ul>';
+ });
+ fetch(`/api/estimate?list_id=${list?list.value:''}`).then(r=>r.json()).then(e=>{
+  const days=[...document.querySelectorAll('input[name=days]:checked')].length||1;
+  const ndays=Math.ceil(e.emailable/Math.max(1,cap)/ (days/7));
+  document.getElementById('review').innerHTML+=`<p>📨 <strong>${e.emailable}</strong> emailable contacts (${e.skipped} skipped: invalid/suppressed) · ≈ <strong>${ndays} days</strong> at ${cap}/day.</p>`;
+ });
+}
+document.getElementById('wizard').addEventListener('submit',e=>{
+ if(!document.getElementById('launch_ack').checked){e.preventDefault();alert('Please confirm the launch.');}
+});
+</script>
+{% endblock %}

@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row-between"><h1>Contact lists</h1>
+<form method="post" action="/contacts/upload" enctype="multipart/form-data" class="inline-form">
+<input type="file" name="file" accept=".xlsx,.csv" required>
+<input type="text" name="name" placeholder="List name" required>
+<button class="btn primary">Upload → map columns</button>
+</form></div>
+<table><tr><th>Name</th><th>Contacts</th><th>Invalid</th><th>Uploaded</th><th></th></tr>
+{% for l in lists %}
+<tr><td><a href="/contacts/lists/{{ l.id }}">{{ l.name }}</a></td><td>{{ l.count }}</td><td>{{ l.invalid }}</td><td>{{ l.created_at[:10] }}</td>
+<td><form method="post" action="/contacts/lists/{{ l.id }}/delete" onsubmit="return confirm('Delete this list and ALL its contacts?');"><button class="btn danger small">Delete</button></form></td></tr>
+{% else %}<tr><td colspan="5" class="muted">No lists yet.</td></tr>{% endfor %}
+</table>
+{% endblock %}

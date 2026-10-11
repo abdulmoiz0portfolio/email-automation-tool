@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Edit contact</h1>
+<form method="post" action="/contacts/{{ c.id }}/edit" class="form">
+<label>Email <input type="email" name="email" value="{{ c.email }}" required></label>
+<div class="grid2">
+<label>First name <input type="text" name="first_name" value="{{ c.first_name }}"></label>
+<label>Last name <input type="text" name="last_name" value="{{ c.last_name }}"></label>
+</div>
+<label>Company <input type="text" name="company" value="{{ c.company }}"></label>
+<div class="grid2">
+<label>Custom 1 <input type="text" name="custom_1" value="{{ c.custom_1 }}"></label>
+<label>Custom 2 <input type="text" name="custom_2" value="{{ c.custom_2 }}"></label>
+</div>
+<label>Custom 3 <input type="text" name="custom_3" value="{{ c.custom_3 }}"></label>
+<button class="btn primary">Save</button>
+<a class="btn" href="/contacts/lists/{{ c.list_id }}">Cancel</a>
+</form>
+{% endblock %}

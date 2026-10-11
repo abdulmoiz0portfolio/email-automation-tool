@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Settings</h1>
+<form method="post" action="/settings" class="form">
+<label>Server timezone <span class="tip" title="Sending windows are evaluated in this timezone unless a campaign sets its own.">?</span>
+<input type="text" name="timezone" value="{{ s.timezone }}" required></label>
+<label>Public base URL <span class="tip" title="Used to build the one-click unsubscribe link in every email. Must be reachable by recipients.">?</span>
+<input type="text" name="base_url" value="{{ s.base_url }}" required></label>
+<label>Default physical mailing address <span class="tip" title="Anti-spam laws require a physical address in marketing emails. Shown in every email footer.">?</span>
+<input type="text" name="physical_address" value="{{ s.physical_address }}" placeholder="e.g. Street, City, Pakistan"></label>
+<label>Reply check interval (minutes) <input type="number" name="reply_poll_minutes" value="{{ s.reply_poll_minutes }}" min="2" max="60"></label>
+<button class="btn primary">Save settings</button>
+</form>
+{% endblock %}

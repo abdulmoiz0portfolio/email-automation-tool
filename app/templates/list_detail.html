@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row-between"><h1>{{ lst.name }}</h1>
+<form method="post" action="/contacts/lists/{{ lst.id }}/add" class="inline-form">
+<input type="email" name="email" placeholder="email (required)" required>
+<input type="text" name="first_name" placeholder="first name">
+<input type="text" name="company" placeholder="company">
+<button class="btn">+ Add contact</button></form></div>
+<table><tr><th>Email</th><th>Name</th><th>Company</th><th>Status</th><th></th></tr>
+{% for c in contacts %}
+<tr><td>{{ c.email }}</td><td>{{ c.first_name }} {{ c.last_name }}</td><td>{{ c.company }}</td>
+<td>{% if c.do_not_contact %}<span class="pill unsubscribed">do not contact</span>{% elif not c.valid %}<span class="pill bounced">invalid</span>{% else %}ok{% endif %}</td>
+<td><a href="/contacts/{{ c.id }}/edit">Edit</a></td></tr>
+{% endfor %}</table>
+<h2>Invalid rows ({{ invalid|length }}) <span class="muted">— quarantined, not deleted</span></h2>
+<table><tr><th>Row</th><th>Reason</th></tr>
+{% for r in invalid %}<tr><td class="muted">{{ r.row_data[:120] }}</td><td>{{ r.reason }}</td></tr>
+{% else %}<tr><td colspan="2" class="muted">None.</td></tr>{% endfor %}</table>
+{% endblock %}

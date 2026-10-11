@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Dashboard</h1>
+
+<h2>Campaigns</h2>
+<table>
+<tr><th>Name</th><th>Status</th><th>Contacts</th><th>Sent</th><th>Replies</th><th>Reply rate</th><th></th></tr>
+{% for c in campaigns %}
+<tr>
+  <td><a href="/campaigns/{{ c.id }}">{{ c.name }}</a></td>
+  <td><span class="pill {{ c.status }}">{{ c.status }}</span></td>
+  <td>{{ c.total }}</td><td>{{ c.sent }}</td><td>{{ c.replies }}</td>
+  <td>{{ c.reply_rate }}%</td>
+  <td><a href="/campaigns/{{ c.id }}">Open</a></td>
+</tr>
+{% else %}
+<tr><td colspan="7" class="muted">No campaigns yet. <a href="/campaigns/new">Create one →</a></td></tr>
+{% endfor %}
+</table>
+
+<h2>Daily usage per account <span class="tip" title="How many emails each account sent today vs its daily cap.">?</span></h2>
+{% for u in usage %}
+<div class="usage">
+  <div class="usage-label">{{ u.label }} ({{ u.email }}) — {{ u.sent }}/{{ u.cap }} today{% if u.warming %} · 🔥 warming up{% endif %}</div>
+  <div class="bar"><div class="fill" style="width:{{ u.pct }}%"></div></div>
+</div>
+{% else %}
+<p class="muted">No accounts connected yet. <a href="/accounts">Add one →</a></p>
+{% endfor %}
+{% endblock %}

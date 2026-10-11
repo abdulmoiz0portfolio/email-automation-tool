@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row-between"><h1>Drafts</h1><a class="btn primary" href="/drafts/new">+ New draft</a></div>
+<table><tr><th>Name</th><th>Version</th><th>Subject</th><th></th></tr>
+{% for d in drafts %}
+<tr><td><a href="/drafts/{{ d.id }}/edit">{{ d.name }}</a></td><td>v{{ d.version }}</td><td class="muted">{{ d.subject[:60] }}</td>
+<td><form method="post" action="/drafts/{{ d.id }}/delete" onsubmit="return confirm('Delete this draft and all its versions?');"><button class="btn danger small">Delete</button></form></td></tr>
+{% else %}<tr><td colspan="4" class="muted">No drafts yet.</td></tr>{% endfor %}
+</table>
+{% endblock %}

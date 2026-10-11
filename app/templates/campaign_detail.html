@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row-between">
+<h1>{{ c.name }} <span class="pill {{ c.status }}">{{ c.status }}</span></h1>
+<div>
+{% if c.status in ('active','scheduled','paused') %}
+<form method="post" action="/campaigns/{{ c.id }}/pause" style="display:inline"><button class="btn">⏸ Pause</button></form>
+{% endif %}
+{% if c.status == 'paused' %}
+<form method="post" action="/campaigns/{{ c.id }}/resume" style="display:inline"><button class="btn primary">▶ Resume</button></form>
+{% endif %}
+{% if c.status in ('active','scheduled','paused') %}
+<form method="post" action="/campaigns/{{ c.id }}/stop" style="display:inline" onsubmit="return confirm('Stop this campaign permanently? Queued contacts will not be emailed.');"><button class="btn danger">⏹ Stop</button></form>
+{% endif %}
+{% if c.status in ('draft',) %}
+<form method="post" action="/campaigns/{{ c.id }}/launch" style="display:inline"><button class="btn primary">🚀 Launch</button></form>
+{% endif %}
+</div>
+</div>
+{% if c.pause_reason %}<div class="banner warn">⏸ {{ c.pause_reason }}</div>{% endif %}
+
+<div class="stats">
+<div class="stat"><div class="num">{{ s.total }}</div><div class="lbl">contacts</div></div>
+<div class="stat"><div class="num">{{ s.sent }}</div><div class="lbl">sent</div></div>
+<div class="stat"><div class="num">{{ s.queued }}</div><div class="lbl">queued</div></div>
+<div class="stat"><div class="num">{{ s.bounced }}</div><div class="lbl">bounced</div></div>
+<div class="stat"><div class="num">{{ s.replies }}</div><div class="lbl">replies</div></div>
+<div class="stat"><div class="num">{{ s.reply_rate }}%</div><div class="lbl">reply rate</div></div>
+<div class="stat"><div class="num">{{ s.unsub }}</div><div class="lbl">unsubscribed</div></div>
+</div>
+
+<h2>Replies by category</h2>
+<table><tr>{% for k,v in s.by_cat.items() %}<th>{{ k }}</th>{% endfor %}</tr>
+<tr>{% for k,v in s.by_cat.items() %}<td>{{ v }}</td>{% endfor %}</tr></table>
+{% if ab %}<h2>A/B split</h2><table><tr><th>Variant</th><th>Sent</th><th>Replies</th></tr>
+{% for r in ab %}<tr><td>{{ r.variant }} ({{ r.draft_name }} v{{ r.draft_version }})</td><td>{{ r.sent }}</td><td>{{ r.replies }}</td></tr>{% endfor %}</table>{% endif %}
+
+<h2>Sends per day</h2>
+<canvas id="chart" width="800" height="220"></canvas>
+
+<h2>Settings</h2>
+<table class="kv">
+<tr><td>Account</td><td>{{ c.account_label }} ({{ c.account_email }})</td></tr>
+<tr><td>Draft</td><td>{{ c.draft_name }} (v{{ c.draft_version }}){% if c.draft_b_name %} + B: {{ c.draft_b_name }} ({{ c.ab_split }}% A){% endif %}
+{% if newer_version %}<form method="post" action="/campaigns/{{ c.id }}/switch-draft" style="display:inline;margin-left:8px"><button class="btn small">Switch to v{{ newer_version }} for remaining sends</button></form>{% endif %}</td></tr>
+<tr><td>Schedule</td><td>{{ c.days }} · {{ c.window_start }}–{{ c.window_end }} ({{ c.timezone }}) · start {{ c.start_date }}</td></tr>
+<tr><td>Pace</td><td>{{ c.gap_min_sec }}–{{ c.gap_max_sec }}s gaps · cap {{ c.daily_cap }}/day</td></tr>
+</table>
+
+<h2>Recent replies</h2>
+<table><tr><th>When</th><th>From</th><th>Category</th><th>Subject</th></tr>
+{% for r in replies %}<tr><td>{{ r.received_at[:16].replace('T',' ') }}</td><td>{{ r.from_email }}</td><td><span class="pill cat">{{ r.category }}</span></td><td>{{ r.subject }}</td></tr>
+{% else %}<tr><td colspan="4" class="muted">No replies yet.</td></tr>{% endfor %}</table>
+
+<h2>Send log <span class="muted">(latest 100)</span></h2>
+<table><tr><th>When</th><th>To</th><th>Variant</th><th>Status</th><th>SMTP response</th></tr>
+{% for x in sends %}<tr><td>{{ (x.sent_at or '')[:19].replace('T',' ') }}</td><td>{{ x.email }}</td><td>{{ x.variant }}</td><td>{{ x.status }}</td><td class="muted">{{ (x.smtp_status or '')[:60] }}</td></tr>{% endfor %}</table>
+{% endblock %}
+{% block scripts %}
+<script>
+fetch('/api/campaigns/{{ c.id }}/daily').then(r=>r.json()).then(d=>{
+ const cv=document.getElementById('chart'),ctx=cv.getContext('2d');
+ const max=Math.max(1,...d.map(x=>x.n));const W=cv.width,H=cv.height,bw=W/Math.max(1,d.length);
+ ctx.clearRect(0,0,W,H);
+ d.forEach((x,i)=>{const h=(x.n/max)*(H-30);
+  ctx.fillStyle='#4f8cff';ctx.fillRect(i*bw+4,H-20-h,bw-8,h);
+  ctx.fillStyle='#666';ctx.font='10px sans-serif';ctx.fillText(x.day.slice(5),i*bw+4,H-6);});
+ if(!d.length){ctx.fillStyle='#888';ctx.fillText('No sends yet',10,20);}
+});
+</script>
+{% endblock %}

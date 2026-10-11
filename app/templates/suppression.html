@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Suppression list <span class="tip" title="Global do-not-contact list. Anyone here is NEVER emailed by any campaign, ever.">?</span></h1>
+<p class="muted">Contacts land here automatically when they unsubscribe or hard-bounce. You can also add addresses manually.</p>
+<form method="post" action="/suppression/add" class="inline-form">
+<input type="email" name="email" placeholder="email to suppress" required>
+<input type="text" name="reason" placeholder="reason (optional)">
+<button class="btn">Add</button></form>
+<table><tr><th>Email</th><th>Reason</th><th>Added</th><th></th></tr>
+{% for s in items %}
+<tr><td>{{ s.email }}</td><td>{{ s.reason }}</td><td>{{ s.created_at[:10] }}</td>
+<td><form method="post" action="/suppression/remove" onsubmit="return confirm('Remove from suppression? They can be emailed again.');"><input type="hidden" name="email" value="{{ s.email }}"><button class="btn small">Remove</button></form></td></tr>
+{% else %}<tr><td colspan="4" class="muted">Empty — nobody suppressed.</td></tr>{% endfor %}
+</table>
+{% endblock %}
