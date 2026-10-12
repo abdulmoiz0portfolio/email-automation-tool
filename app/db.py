@@ -4,7 +4,7 @@ import os
 import sqlite3
 import threading
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+DATA_DIR = os.environ.get("DATA_DIR") or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 DB_PATH = os.path.join(DATA_DIR, "emailtool.db")
 
 _local = threading.local()
