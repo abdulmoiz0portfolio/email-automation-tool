@@ -49,11 +49,12 @@
 
 <h2>Settings</h2>
 <table class="kv">
-<tr><td>Account</td><td>{{ c.account_label }} ({{ c.account_email }})</td></tr>
+<tr><td>Account{{ 's' if send_accounts|length>1 }}</td><td>{% for a in send_accounts %}<span class="pill {{ a.status }}">{{ a.label }}</span> <span class="muted">{{ a.email }}</span>{% if not loop.last %}<br>{% endif %}{% else %}{{ c.account_label }} ({{ c.account_email }}){% endfor %}</td></tr>
 <tr><td>Draft</td><td>{{ c.draft_name }} (v{{ c.draft_version }}){% if c.draft_b_name %} + B: {{ c.draft_b_name }} ({{ c.ab_split }}% A){% endif %}
 {% if newer_version %}<form method="post" action="/campaigns/{{ c.id }}/switch-draft" style="display:inline;margin-left:8px"><button class="btn small">Switch to v{{ newer_version }} for remaining sends</button></form>{% endif %}</td></tr>
 <tr><td>Schedule</td><td>{{ c.sched_summary }} · start {{ c.start_date }}</td></tr>
 <tr><td>Pace</td><td>{{ c.gap_min_sec }}–{{ c.gap_max_sec }}s gaps · cap {{ c.daily_cap }}/day{% if c.hourly_cap %} · {{ c.hourly_cap }}/hour{% endif %}</td></tr>
+<tr><td>Sheet write-back</td><td>{% if c.mark_sent_in_sheet %}<span class="pill connected">ON</span> — sent account is marked in the linked Google Sheet{% else %}<span class="muted">off</span>{% endif %}</td></tr>
 <tr><td>Tracking</td><td>{% if c.open_tracking %}👁 open{% endif %}{% if c.click_tracking %} · 🔗 click{% endif %}{% if not c.open_tracking and not c.click_tracking %}<span class="muted">off</span>{% endif %}</td></tr>
 </table>
 
@@ -71,8 +72,8 @@
 <button class="btn">Search</button>
 {% if sq or sstatus %}<a class="btn" href="/campaigns/{{ c.id }}">Clear</a>{% endif %}
 </form>
-<table><tr><th>When</th><th>To</th><th>Variant</th><th>Status</th><th>SMTP response</th></tr>
-{% for x in sends %}<tr><td>{{ (x.sent_at or '')[:19].replace('T',' ') }}</td><td>{{ x.email }}</td><td>{{ x.variant }}</td><td>{{ x.status }}</td><td class="muted">{{ (x.smtp_status or '')[:60] }}</td></tr>{% endfor %}</table>
+<table><tr><th>When</th><th>To</th><th>Sent via</th><th>Variant</th><th>Status</th><th>SMTP response</th></tr>
+{% for x in sends %}<tr><td>{{ (x.sent_at or '')[:19].replace('T',' ') }}</td><td>{{ x.email }}</td><td class="muted">{{ x.sent_via or '—' }}</td><td>{{ x.variant }}</td><td>{{ x.status }}</td><td class="muted">{{ (x.smtp_status or '')[:60] }}</td></tr>{% endfor %}</table>
 {% set base = '/campaigns/%d'|format(c.id) %}{% set pg = spg %}{% set q = sq %}{% set status = sstatus %}{% include "_pager.html" %}
 {% endblock %}
 {% block scripts %}
