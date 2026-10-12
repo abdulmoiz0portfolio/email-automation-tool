@@ -7,7 +7,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 
-from fastapi import FastAPI, Request, Form, UploadFile, File, HTTPException
+from fastapi import FastAPI, Request, Form, UploadFile, File, HTTPException, Depends
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -15,6 +15,7 @@ from fastapi.templating import Jinja2Templates
 from . import db
 from . import worker as worker_mod
 from . import mail as mailmod
+from . import auth as authmod
 from .crypto import encrypt
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -33,6 +34,123 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Email Automation Tool", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=os.path.join(BASE, "static")), name="static")
 templates = Jinja2Templates(directory=os.path.join(BASE, "templates"))
+
+
+# ---------------- auth: first-run setup, session gate, sudo ----------------
+
+PUBLIC_PREFIXES = ("/login", "/logout", "/setup", "/u/", "/t/", "/static")
+
+
+@app.middleware("http")
+async def auth_gate(request: Request, call_next):
+    path = request.url.path
+    if path.startswith(PUBLIC_PREFIXES):
+        return await call_next(request)
+    if authmod.needs_setup():
+        if path != "/setup":
+            return RedirectResponse("/setup", status_code=303)
+        return await call_next(request)
+    session = authmod.get_session(request.cookies.get(authmod.SESSION_COOKIE, ""))
+    if not session:
+        if path.startswith("/api/"):
+            return JSONResponse({"detail": "Not authenticated"}, status_code=401)
+        return RedirectResponse(f"/login?next={path}", status_code=303)
+    request.state.session = session
+    return await call_next(request)
+
+
+def current_session(request: Request):
+    return getattr(request.state, "session", None)
+
+
+def sudo_or_redirect(request: Request):
+    """Returns None if sudo is active, else a redirect to the sudo page."""
+    if authmod.has_sudo(current_session(request)):
+        return None
+    return RedirectResponse(f"/sudo?next={request.url.path}", status_code=303)
+
+
+@app.get("/setup", response_class=HTMLResponse)
+def setup_page(request: Request):
+    if not authmod.needs_setup():
+        return RedirectResponse("/login", status_code=303)
+    return templates.TemplateResponse(request, "setup.html", {"request": request})
+
+
+@app.post("/setup")
+def setup_create(username: str = Form(...), password: str = Form(...),
+                 password2: str = Form(...)):
+    if not authmod.needs_setup():
+        return RedirectResponse("/login", status_code=303)
+    username = (username or "").strip() or "admin"
+    if len(password or "") < 8:
+        return HTMLResponse("<h2>Password must be at least 8 characters.</h2>"
+                            '<p><a href="/setup">Back</a></p>', status_code=400)
+    if password != password2:
+        return HTMLResponse("<h2>Passwords do not match.</h2>"
+                            '<p><a href="/setup">Back</a></p>', status_code=400)
+    authmod.set_setting("admin_username", username)
+    authmod.set_setting("admin_password_hash", authmod.hash_password(password))
+    resp = RedirectResponse("/", status_code=303)
+    resp.set_cookie(authmod.SESSION_COOKIE, authmod.create_session(),
+                    httponly=True, samesite="lax", max_age=7 * 86400)
+    return resp
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request, next: str = "/"):
+    if not authmod.needs_setup():
+        s = authmod.get_session(request.cookies.get(authmod.SESSION_COOKIE, ""))
+        if s:
+            return RedirectResponse(next or "/", status_code=303)
+    return templates.TemplateResponse(request, "login.html",
+                                      {"request": request, "next": next})
+
+
+@app.post("/login")
+def login_do(request: Request, username: str = Form(...), password: str = Form(...),
+             next: str = Form("/")):
+    if authmod.needs_setup():
+        return RedirectResponse("/setup", status_code=303)
+    if not authmod.authenticate(username, password):
+        return templates.TemplateResponse(request, "login.html",
+                                          {"request": request, "next": next,
+                                           "error": "Invalid username or password."},
+                                          status_code=401)
+    resp = RedirectResponse(next or "/", status_code=303)
+    resp.set_cookie(authmod.SESSION_COOKIE, authmod.create_session(),
+                    httponly=True, samesite="lax", max_age=7 * 86400)
+    return resp
+
+
+@app.get("/logout")
+def logout(request: Request):
+    authmod.destroy_session(request.cookies.get(authmod.SESSION_COOKIE, ""))
+    resp = RedirectResponse("/login", status_code=303)
+    resp.delete_cookie(authmod.SESSION_COOKIE)
+    return resp
+
+
+@app.get("/sudo", response_class=HTMLResponse)
+def sudo_page(request: Request, next: str = "/accounts"):
+    return templates.TemplateResponse(request, "sudo.html",
+                                      {"request": request, "next": next})
+
+
+@app.post("/sudo")
+def sudo_do(request: Request, password: str = Form(...), next: str = Form("/accounts")):
+    session = current_session(request)
+    if not session:
+        return RedirectResponse("/login", status_code=303)
+    username = authmod.get_setting("admin_username", "admin")
+    if not authmod.authenticate(username, password):
+        return templates.TemplateResponse(request, "sudo.html",
+                                          {"request": request, "next": next,
+                                           "error": "Wrong password."},
+                                          status_code=401)
+    token = authmod._unsign(request.cookies.get(authmod.SESSION_COOKIE, ""))
+    authmod.grant_sudo(token)
+    return RedirectResponse(next or "/accounts", status_code=303)
 
 
 def utcnow_s():
@@ -530,7 +648,10 @@ def contact_edit(cid: int, email: str = Form(...), first_name: str = Form(""),
 
 
 @app.post("/contacts/lists/{lid}/delete")
-def list_delete(lid: int):
+def list_delete(request: Request, lid: int):
+    gate = sudo_or_redirect(request)
+    if gate:
+        return gate
     db.tx(lambda c: (c.execute("DELETE FROM invalid_rows WHERE list_id=?", (lid,)),
                      c.execute("DELETE FROM contacts WHERE list_id=?", (lid,)),
                      c.execute("DELETE FROM contact_lists WHERE id=?", (lid,))))
@@ -617,7 +738,10 @@ def draft_new_version(did: int, name: str = Form(...), subject: str = Form(...),
 
 
 @app.post("/drafts/{did}/delete")
-def draft_delete(did: int):
+def draft_delete(request: Request, did: int):
+    gate = sudo_or_redirect(request)
+    if gate:
+        return gate
     conn = db.get_db()
     used = conn.execute("SELECT COUNT(*) c FROM campaigns WHERE draft_id=? OR draft_b_id=?",
                         (did, did)).fetchone()["c"]
@@ -661,22 +785,26 @@ def account_new_page(request: Request):
 
 
 @app.post("/accounts")
-def account_create(label: str = Form(...), email: str = Form(...),
+def account_create(request: Request, label: str = Form(...), email: str = Form(...),
                    smtp_host: str = Form(...), smtp_port: int = Form(587),
                    smtp_user: str = Form(...), smtp_pass: str = Form(...),
                    smtp_enc: str = Form("STARTTLS"),
                    imap_host: str = Form(...), imap_port: int = Form(993),
                    imap_user: str = Form(...), imap_pass: str = Form(...),
-                   imap_enc: str = Form("SSL")):
+                   imap_enc: str = Form("SSL"),
+                   imap_enabled: str = Form("")):
+    gate = sudo_or_redirect(request)
+    if gate:
+        return gate
     def _do(conn):
         cur = conn.execute(
             """INSERT INTO accounts(label, email, smtp_host, smtp_port, smtp_user, smtp_pass_enc, smtp_enc,
-               imap_host, imap_port, imap_user, imap_pass_enc, imap_enc, status, created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?, 'unknown', ?)""",
+               imap_host, imap_port, imap_user, imap_pass_enc, imap_enc, imap_enabled, status, created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?, 'unknown', ?)""",
             (label.strip(), email.strip().lower(), smtp_host.strip(), smtp_port,
              smtp_user.strip(), encrypt(smtp_pass), smtp_enc,
              imap_host.strip(), imap_port, imap_user.strip(), encrypt(imap_pass),
-             imap_enc, utcnow_s()))
+             imap_enc, 1 if imap_enabled else 0, utcnow_s()))
         return cur.lastrowid
     aid = db.tx(_do)
     return redir("/accounts", "Account saved. Run 'Test connection' to verify.", "info")
@@ -703,7 +831,10 @@ def account_test(aid: int):
 
 
 @app.post("/accounts/{aid}/delete")
-def account_delete(aid: int):
+def account_delete(request: Request, aid: int):
+    gate = sudo_or_redirect(request)
+    if gate:
+        return gate
     db.tx(lambda c: c.execute("DELETE FROM accounts WHERE id=?", (aid,)))
     return redir("/accounts", "Account deleted.", "info")
 
@@ -754,7 +885,10 @@ def suppression_add(email: str = Form(...), reason: str = Form("")):
 
 
 @app.post("/suppression/remove")
-def suppression_remove(email: str = Form(...)):
+def suppression_remove(request: Request, email: str = Form(...)):
+    gate = sudo_or_redirect(request)
+    if gate:
+        return gate
     db.tx(lambda c: c.execute("DELETE FROM suppression WHERE email=?", (email.strip().lower(),)))
     return redir("/suppression", "Removed from suppression list.", "info")
 

@@ -316,6 +316,8 @@ def poll_inboxes():
     accounts = conn.execute("SELECT * FROM accounts").fetchall()
     for a in accounts:
         a = dict(a)
+        if not int(a.get("imap_enabled", 1)):
+            continue  # send-only account: no reply monitoring
         try:
             replies = mailmod.fetch_unseen_replies(a)
         except Exception:

@@ -106,6 +106,50 @@ CREATE TABLE IF NOT EXISTS suppression(
 CREATE TABLE IF NOT EXISTS settings(
     key TEXT PRIMARY KEY, value TEXT NOT NULL
 );
+-- v2: admin auth sessions
+CREATE TABLE IF NOT EXISTS sessions(
+    token TEXT PRIMARY KEY, created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL, sudo_until TEXT
+);
+-- v2: deliverability seed inboxes
+CREATE TABLE IF NOT EXISTS seed_accounts(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL, imap_host TEXT NOT NULL,
+    imap_port INTEGER NOT NULL DEFAULT 993,
+    imap_user TEXT NOT NULL, imap_pass_enc TEXT NOT NULL,
+    provider TEXT NOT NULL DEFAULT 'other',
+    created_at TEXT NOT NULL
+);
+-- v2: click tracking
+CREATE TABLE IF NOT EXISTS clicks(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    send_id INTEGER NOT NULL REFERENCES sends(id) ON DELETE CASCADE,
+    url TEXT NOT NULL, clicked_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_clicks_send ON clicks(send_id);
+-- v2: multi-step follow-up sequences
+CREATE TABLE IF NOT EXISTS campaign_steps(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    step_order INTEGER NOT NULL, draft_id INTEGER NOT NULL REFERENCES drafts(id),
+    draft_version INTEGER NOT NULL, delay_days INTEGER NOT NULL DEFAULT 3,
+    created_at TEXT NOT NULL,
+    UNIQUE(campaign_id, step_order)
+);
+CREATE INDEX IF NOT EXISTS idx_steps_campaign ON campaign_steps(campaign_id, step_order);
+-- v2: chunked CSV import jobs
+CREATE TABLE IF NOT EXISTS import_jobs(
+    id TEXT PRIMARY KEY, filename TEXT NOT NULL, list_name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'parsing', processed INTEGER NOT NULL DEFAULT 0,
+    total INTEGER NOT NULL DEFAULT 0, headers TEXT, rows_path TEXT,
+    error TEXT, created_at TEXT NOT NULL
+);
+-- v2: deliverability test runs
+CREATE TABLE IF NOT EXISTS deliverability_tests(
+    id TEXT PRIMARY KEY, draft_id INTEGER, account_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'running', results TEXT,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -130,6 +174,7 @@ def get_db():
 def init_db():
     conn = get_db()
     conn.executescript(SCHEMA)
+    _migrate(conn)
     defaults = {
         "timezone": "Asia/Karachi",
         "base_url": "http://localhost:8000",
@@ -139,6 +184,29 @@ def init_db():
     for k, v in defaults.items():
         conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", (k, v))
     conn.commit()
+
+
+# v2 column migrations for pre-existing tables (fresh DBs get them via... the
+# ALTERs below run for every DB, guarded by PRAGMA checks, so both cases work).
+_MIGRATIONS = [
+    ("accounts", "imap_enabled", "INTEGER NOT NULL DEFAULT 1"),
+    ("contacts", "custom_fields", "TEXT NOT NULL DEFAULT '{}'"),
+    ("sends", "opened_at", "TEXT"),
+    ("campaigns", "open_tracking", "INTEGER NOT NULL DEFAULT 0"),
+    ("campaigns", "click_tracking", "INTEGER NOT NULL DEFAULT 0"),
+    ("campaigns", "schedule_mode", "TEXT NOT NULL DEFAULT 'continuous'"),
+    ("campaigns", "send_slots", "TEXT NOT NULL DEFAULT '[]'"),
+    ("campaigns", "hourly_cap", "INTEGER NOT NULL DEFAULT 0"),
+    ("campaign_contacts", "step", "INTEGER NOT NULL DEFAULT 1"),
+    ("campaign_contacts", "step_due_at", "TEXT"),
+]
+
+
+def _migrate(conn):
+    for table, column, ddl in _MIGRATIONS:
+        cols = [r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
 
 _db_lock = threading.RLock()

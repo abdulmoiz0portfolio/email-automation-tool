@@ -25,6 +25,7 @@
 <label>Password / App Password <input type="password" name="imap_pass" required autocomplete="new-password"></label>
 </div>
 <label>Encryption <select name="imap_enc"><option>SSL</option><option>STARTTLS</option><option>NONE</option></select></label>
+<label><input type="checkbox" name="imap_enabled" value="1" checked> Enable Reply Monitoring (IMAP) <span class="tip" title="When ON, the tool polls this inbox for replies, bounces and unsubscribes. Turn OFF for send-only accounts — IMAP will not be tested or polled.">?</span></label>
 <button class="btn primary">💾 Save account</button>
 </form>
 <div class="card">

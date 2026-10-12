@@ -154,7 +154,11 @@ def test_connection(account: dict, timeout: int = 20):
     if not ok:
         return result
 
-    # IMAP read-back: poll for the test subject
+    # IMAP read-back: poll for the test subject (skipped for send-only accounts)
+    if not int(account.get("imap_enabled", 1)):
+        result["imap_ok"] = True
+        result["imap_msg"] = "IMAP monitoring disabled for this account (send-only)"
+        return result
     password = decrypt(account["imap_pass_enc"])
     try:
         mail = _imap_connect(account, password, timeout)

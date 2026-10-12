@@ -1,0 +1,12 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>First-run setup — Email Tool</title><link rel="stylesheet" href="/static/style.css"></head>
+<body><div style="max-width:420px;margin:80px auto" class="card">
+<h1>🔐 First-run setup</h1>
+<p class="muted">Create the admin account that protects this tool. You'll need these credentials to log in.</p>
+<form method="post" action="/setup" class="form">
+<label>Admin username <input type="text" name="username" value="admin" required autocomplete="username"></label>
+<label>Admin password <input type="password" name="password" required autocomplete="new-password" minlength="8"></label>
+<label>Confirm password <input type="password" name="password2" required autocomplete="new-password" minlength="8"></label>
+<button class="btn primary">Create admin account</button>
+</form></div></body></html>

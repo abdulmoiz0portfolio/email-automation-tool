@@ -32,6 +32,22 @@ PASS = []
 FAIL = []
 
 
+def _auth_setup():
+    """First-run setup + login, so the authed test client passes the auth gate."""
+    r = client.get("/", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/setup", \
+        f"expected setup redirect, got {r.status_code} {r.headers.get('location')}"
+    r = client.post("/setup", data={"username": "admin", "password": "testpass123",
+                                    "password2": "testpass123"}, follow_redirects=False)
+    assert r.status_code == 303, r.status_code
+    # setup auto-logs-in; verify
+    r = client.get("/")
+    assert r.status_code == 200, r.status_code
+
+
+_auth_setup()
+
+
 def check(name, fn):
     try:
         fn()

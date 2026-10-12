@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Confirm — Email Tool</title><link rel="stylesheet" href="/static/style.css"></head>
+<body><div style="max-width:420px;margin:80px auto" class="card">
+<h1>🛡️ Sensitive area</h1>
+<p class="muted">Re-enter your admin password to unlock credential changes and deletions for the next <strong>10 minutes</strong>. Passwords are never shown — only <code>••••••••</code>.</p>
+{% if error %}<div class="banner err">{{ error }}</div>{% endif %}
+<form method="post" action="/sudo" class="form">
+<input type="hidden" name="next" value="{{ next or '/accounts' }}">
+<label>Admin password <input type="password" name="password" required autocomplete="current-password" autofocus></label>
+<button class="btn primary">Unlock for 10 minutes</button>
+<a class="btn" href="/accounts">Cancel</a>
+</form></div></body></html>
