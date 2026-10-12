@@ -1,13 +1,40 @@
 <!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Confirm — Email Tool</title><link rel="stylesheet" href="/static/style.css"></head>
-<body><div style="max-width:420px;margin:80px auto" class="card">
-<h1>🛡️ Sensitive area</h1>
-<p class="muted">Re-enter your admin password to unlock credential changes and deletions for the next <strong>10 minutes</strong>. Passwords are never shown — only <code>••••••••</code>.</p>
-{% if error %}<div class="banner err">{{ error }}</div>{% endif %}
-<form method="post" action="/sudo" class="form">
-<input type="hidden" name="next" value="{{ next or '/accounts' }}">
-<label>Admin password <input type="password" name="password" required autocomplete="current-password" autofocus></label>
-<button class="btn primary">Unlock for 10 minutes</button>
-<a class="btn" href="/accounts">Cancel</a>
-</form></div></body></html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sudo Security Verification — Automatixes</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body style="display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 20px;">
+<div class="card" style="max-width: 440px; width: 100%; padding: 32px; border-color: rgba(239, 68, 68, 0.3);">
+  <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 20px;">
+    <div style="font-size: 28px;">🛡️</div>
+    <div>
+      <h1 style="margin: 0; font-size: 22px; font-weight: 700; color: #fca5a5;">Sensitive Operation</h1>
+      <p class="muted" style="margin: 2px 0 0 0; font-size: 13px;">Security authentication required</p>
+    </div>
+  </div>
+
+  <p class="muted" style="font-size: 13px; line-height: 1.6; margin-bottom: 20px;">
+    Re-enter your admin password to unlock viewing and modifying sensitive credentials (SMTP passwords, OAuth secrets) for the next <strong>10 minutes</strong>.
+  </p>
+
+  {% if error %}
+    <div class="banner err" style="margin-bottom: 20px;">{{ error }}</div>
+  {% endif %}
+
+  <form method="post" action="/sudo" class="form">
+    <input type="hidden" name="next" value="{{ next or '/accounts' }}">
+    <label>
+      Admin Password
+      <input type="password" name="password" required autocomplete="current-password" autofocus placeholder="••••••••">
+    </label>
+    <div style="display: flex; gap: 10px; margin-top: 20px;">
+      <button class="btn primary" style="flex: 1; padding: 11px;">Unlock for 10 min →</button>
+      <a class="btn" href="/accounts" style="padding: 11px 18px;">Cancel</a>
+    </div>
+  </form>
+</div>
+</body>
+</html>

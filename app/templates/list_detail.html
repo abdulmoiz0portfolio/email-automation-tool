@@ -1,35 +1,134 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="row-between"><h1>{{ lst.name }}</h1>
-<form method="post" action="/contacts/lists/{{ lst.id }}/add" class="inline-form">
-<input type="email" name="email" placeholder="email (required)" required>
-<input type="text" name="first_name" placeholder="first name">
-<input type="text" name="company" placeholder="company">
-<button class="btn">+ Add contact</button></form>
-{% if lst.gsheet_id %}<span class="pill">Google Sheet</span>
-<span class="muted">Tab: {{ lst.gsheet_tab or 'first sheet' }} · Last synced: {{ lst.gsheet_synced_at[:16] if lst.gsheet_synced_at else 'never' }}</span>
-<form method="post" action="/contacts/lists/{{ lst.id }}/gsheet-sync" class="inline-form" style="display:inline"><button class="btn">Sync now</button></form>{% endif %}</div>
-<form method="get" action="/contacts/lists/{{ lid }}" class="inline-form">
-<input type="text" name="q" value="{{ q }}" placeholder="Search email, name, company…">
-<select name="status">
-<option value="">all</option>
-<option value="ok" {% if status=='ok' %}selected{% endif %}>ok</option>
-<option value="invalid" {% if status=='invalid' %}selected{% endif %}>invalid</option>
-<option value="suppressed" {% if status=='suppressed' %}selected{% endif %}>do not contact</option>
-</select>
-<button class="btn">Search</button>
-{% if q or status %}<a class="btn" href="/contacts/lists/{{ lid }}">Clear</a>{% endif %}
-</form>
-<table><tr><th>Email</th><th>Name</th><th>Company</th><th>Custom fields</th><th>Status</th><th></th></tr>
-{% for c in contacts %}
-<tr><td>{{ c.email }}</td><td>{{ c.first_name }} {{ c.last_name }}</td><td>{{ c.company }}</td>
-<td class="muted">{% if c.custom_fields and c.custom_fields != '{}' %}{{ c.custom_fields[:80] }}{% else %}—{% endif %}</td>
-<td>{% if c.do_not_contact %}<span class="pill unsubscribed">do not contact</span>{% elif not c.valid %}<span class="pill bounced">invalid</span>{% else %}ok{% endif %}</td>
-<td><a href="/contacts/{{ c.id }}/edit">Edit</a></td></tr>
-{% endfor %}</table>
+<div class="row-between" style="margin-bottom: 20px;">
+  <div>
+    <div style="display: flex; align-items: center; gap: 10px;">
+      <h1>{{ lst.name }}</h1>
+      <span class="pill active">{{ pg.total if pg else contacts|length }} Total Records</span>
+      {% if lst.gsheet_id %}
+        <span class="pill">📊 Google Sheet</span>
+      {% endif %}
+    </div>
+    <p class="muted" style="margin: 4px 0 0 0; font-size: 13.5px;">Audience list inspection, lead hygiene, and export.</p>
+  </div>
+  <div style="display: flex; align-items: center; gap: 8px;">
+    <a class="btn small" href="/contacts/lists/{{ lst.id }}/export.xlsx" title="Export updated lead list with 'Sent' marks as Excel file">📥 Export .xlsx</a>
+    <a class="btn small" href="/contacts/lists/{{ lst.id }}/export.csv" title="Export updated lead list with 'Sent' marks as CSV file">📥 Export .csv</a>
+    <a class="btn" href="/contacts">← Back to Lists</a>
+  </div>
+</div>
+
+{% if lst.gsheet_id %}
+<div class="card" style="margin-bottom: 20px; background: rgba(59, 130, 246, 0.05); border-color: rgba(59, 130, 246, 0.2);">
+  <div class="row-between">
+    <div>
+      <strong style="color: #60a5fa;">Google Sheet Linked</strong>
+      <span class="muted" style="margin-left: 10px; font-size: 13px;">Tab: <strong>{{ lst.gsheet_tab or 'first sheet' }}</strong> · Last synced: {{ lst.gsheet_synced_at[:16] if lst.gsheet_synced_at else 'never' }}</span>
+    </div>
+    <form method="post" action="/contacts/lists/{{ lst.id }}/gsheet-sync" style="margin: 0;">
+      <button class="btn primary small">🔄 Sync with Sheet Now</button>
+    </form>
+  </div>
+</div>
+{% endif %}
+
+<div class="card" style="margin-bottom: 24px;">
+  <h3>➕ Add Single Contact</h3>
+  <form method="post" action="/contacts/lists/{{ lst.id }}/add" class="inline-form" style="flex-wrap: wrap;">
+    <input type="email" name="email" placeholder="contact@company.com" required style="flex: 1; min-width: 200px;">
+    <input type="text" name="first_name" placeholder="First Name" style="flex: 1; min-width: 140px;">
+    <input type="text" name="company" placeholder="Company Name" style="flex: 1; min-width: 160px;">
+    <button class="btn primary">+ Save Contact</button>
+  </form>
+</div>
+
+<div class="card" style="margin-bottom: 20px;">
+  <form method="get" action="/contacts/lists/{{ lid }}" class="inline-form" style="margin: 0;">
+    <input type="text" name="q" value="{{ q or '' }}" placeholder="Search email, name, company…" style="flex: 1; min-width: 240px;">
+    <select name="status" style="width: auto;">
+      <option value="">All Statuses</option>
+      <option value="ok" {% if status=='ok' %}selected{% endif %}>Valid Leads</option>
+      <option value="invalid" {% if status=='invalid' %}selected{% endif %}>Invalid / Bounced</option>
+      <option value="suppressed" {% if status=='suppressed' %}selected{% endif %}>Do Not Contact</option>
+    </select>
+    <button class="btn primary">Search</button>
+    {% if q or status %}<a class="btn" href="/contacts/lists/{{ lid }}">Clear Filter</a>{% endif %}
+  </form>
+</div>
+
+<h2>Audience Members</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Email Address</th>
+      <th>Contact Name</th>
+      <th>Company</th>
+      <th>Deliverability</th>
+      <th>Mail Sent (Sheet Slot)</th>
+      <th>Sent By Email</th>
+      <th style="text-align: right;">Action</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for c in contacts %}
+    <tr>
+      <td>
+        <strong style="font-family: 'JetBrains Mono', monospace; font-size: 13.5px;">{{ c.email }}</strong>
+      </td>
+      <td>{{ c.first_name }} {{ c.last_name }}</td>
+      <td>{{ c.company or '—' }}</td>
+      <td>
+        {% if c.do_not_contact %}
+          <span class="pill paused">Do Not Contact</span>
+        {% elif not c.valid %}
+          <span class="pill failed">Invalid</span>
+        {% else %}
+          <span class="pill active">Valid</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if c.mail_sent %}
+          <span class="pill active">✅ {{ c.mail_sent }}</span>
+        {% else %}
+          <span class="muted" style="font-size: 12.5px;">—</span>
+        {% endif %}
+      </td>
+      <td class="muted" style="font-family: 'JetBrains Mono', monospace; font-size: 12px;">
+        {{ c.sent_by_account or '—' }}
+      </td>
+      <td style="text-align: right;">
+        <a class="btn small" href="/contacts/{{ c.id }}/edit">✏️ Edit</a>
+      </td>
+    </tr>
+  {% else %}
+    <tr>
+      <td colspan="7" class="muted" style="text-align: center; padding: 32px;">No contacts matching the criteria.</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
 {% set base = '/contacts/lists/%d'|format(lid) %}{% include "_pager.html" %}
-<h2>Invalid rows ({{ invalid|length }}) <span class="muted">— quarantined, not deleted</span></h2>
-<table><tr><th>Row</th><th>Reason</th></tr>
-{% for r in invalid %}<tr><td class="muted">{{ r.row_data[:120] }}</td><td>{{ r.reason }}</td></tr>
-{% else %}<tr><td colspan="2" class="muted">None.</td></tr>{% endfor %}</table>
+
+<h2>Quarantined Invalid Rows ({{ invalid|length }}) <span class="tip" title="Rows that failed email validation or format rules. Kept for review so no data is silently lost.">?</span></h2>
+<table>
+  <thead>
+    <tr>
+      <th>Raw Data Excerpt</th>
+      <th>Quarantine Reason</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for r in invalid %}
+    <tr>
+      <td class="muted" style="font-family: 'JetBrains Mono', monospace; font-size: 12px;">{{ r.row_data[:120] }}</td>
+      <td><span class="pill failed">{{ r.reason }}</span></td>
+    </tr>
+  {% else %}
+    <tr>
+      <td colspan="2" class="muted" style="text-align: center; padding: 24px;">✨ 100% clean — zero invalid or quarantined records.</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
 {% endblock %}

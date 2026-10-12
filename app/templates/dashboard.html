@@ -1,30 +1,136 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>Dashboard</h1>
+<div class="row-between">
+  <div>
+    <h1>Outreach Command Center</h1>
+    <p class="muted" style="margin: 4px 0 0 0; font-size: 13.5px;">Real-time telemetry, campaign velocity, and email deliverability health.</p>
+  </div>
+  <a class="btn primary" href="/campaigns/new">+ New Campaign</a>
+</div>
 
-<h2>Campaigns</h2>
-<table>
-<tr><th>Name</th><th>Status</th><th>Contacts</th><th>Sent</th><th>Replies</th><th>Reply rate</th><th></th></tr>
+{% set ns = namespace(total_contacts=0, total_sent=0, total_replies=0, active_count=0) %}
 {% for c in campaigns %}
-<tr>
-  <td><a href="/campaigns/{{ c.id }}">{{ c.name }}</a></td>
-  <td><span class="pill {{ c.status }}">{{ c.status }}</span></td>
-  <td>{{ c.total }}</td><td>{{ c.sent }}</td><td>{{ c.replies }}</td>
-  <td>{{ c.reply_rate }}%</td>
-  <td><a href="/campaigns/{{ c.id }}">Open</a></td>
-</tr>
-{% else %}
-<tr><td colspan="7" class="muted">No campaigns yet. <a href="/campaigns/new">Create one →</a></td></tr>
+  {% set ns.total_contacts = ns.total_contacts + (c.total or 0) %}
+  {% set ns.total_sent = ns.total_sent + (c.sent or 0) %}
+  {% set ns.total_replies = ns.total_replies + (c.replies or 0) %}
+  {% if c.status == 'active' %}
+    {% set ns.active_count = ns.active_count + 1 %}
+  {% endif %}
 {% endfor %}
+
+<div class="stats">
+  <div class="stat">
+    <div class="num" style="color: #60a5fa;">{{ ns.active_count }}</div>
+    <div class="lbl">Active Campaigns</div>
+  </div>
+  <div class="stat">
+    <div class="num">{{ ns.total_sent }}</div>
+    <div class="lbl">Total Sent</div>
+  </div>
+  <div class="stat">
+    <div class="num" style="color: #34d399;">{{ ns.total_replies }}</div>
+    <div class="lbl">Total Replies</div>
+  </div>
+  <div class="stat">
+    <div class="num" style="color: #a78bfa;">
+      {% if ns.total_sent > 0 %}
+        {{ (ns.total_replies / ns.total_sent * 100) | round(1) }}%
+      {% else %}
+        0%
+      {% endif %}
+    </div>
+    <div class="lbl">Reply Velocity</div>
+  </div>
+  <div class="stat">
+    <div class="num" style="color: #38bdf8;">{{ ns.total_contacts }}</div>
+    <div class="lbl">Audience Pool</div>
+  </div>
+</div>
+
+<div class="row-between" style="margin-top: 36px;">
+  <h2>Active Campaigns <span class="tip" title="All campaigns and their real-time delivery statistics">?</span></h2>
+  {% if campaigns %}
+    <a href="/campaigns" class="muted" style="font-size: 13px; text-decoration: none;">View all campaigns →</a>
+  {% endif %}
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th>Campaign Name</th>
+      <th>Status</th>
+      <th>Audience</th>
+      <th>Sent</th>
+      <th>Replies</th>
+      <th>Conversion</th>
+      <th style="text-align: right;">Action</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for c in campaigns %}
+    <tr>
+      <td>
+        <strong style="display: block; font-size: 14px; margin-bottom: 2px;">
+          <a href="/campaigns/{{ c.id }}">{{ c.name }}</a>
+        </strong>
+        <span class="muted" style="font-size: 11.5px;">ID #{{ c.id }}</span>
+      </td>
+      <td>
+        <span class="pill {{ c.status }}">{{ c.status }}</span>
+      </td>
+      <td><strong>{{ c.total }}</strong> <span class="muted">leads</span></td>
+      <td>{{ c.sent }}</td>
+      <td><span style="color: #34d399; font-weight: 600;">{{ c.replies }}</span></td>
+      <td>
+        <span class="pill cat">{{ c.reply_rate }}%</span>
+      </td>
+      <td style="text-align: right;">
+        <a class="btn small" href="/campaigns/{{ c.id }}">Telemetry →</a>
+      </td>
+    </tr>
+  {% else %}
+    <tr>
+      <td colspan="7" class="muted" style="text-align: center; padding: 40px 20px;">
+        <div style="font-size: 28px; margin-bottom: 8px;">📬</div>
+        <strong>No outreach campaigns found.</strong>
+        <p style="margin: 6px 0 16px 0; font-size: 13px;">Create your first automated email campaign to start reaching out.</p>
+        <a class="btn primary small" href="/campaigns/new">+ Create Campaign</a>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
 </table>
 
-<h2>Daily usage per account <span class="tip" title="How many emails each account sent today vs its daily cap.">?</span></h2>
+<h2 style="margin-top: 40px;">Daily usage per account <span class="tip" title="Daily email caps and warm-up ramp progression for each connected sender">?</span></h2>
+
 {% for u in usage %}
-<div class="usage">
-  <div class="usage-label">{{ u.label }} ({{ u.email }}) — {{ u.sent }}/{{ u.cap }} today{% if u.warming %} · <span class="pill warming" title="Daily Send Volume Throttling Ramp: this account is new, so sends are capped low (20/day +10/day) to protect deliverability.">🔥 warming up</span>{% endif %}</div>
-  <div class="bar"><div class="fill" style="width:{{ u.pct }}%"></div></div>
-</div>
+  <div class="usage">
+    <div class="usage-label">
+      <div>
+        <strong style="color: #ffffff;">{{ u.label }}</strong>
+        <span class="muted">({{ u.email }})</span>
+        {% if u.warming %}
+          <span class="pill" style="margin-left: 8px; background: rgba(245, 158, 11, 0.15); color: #fbbf24; border-color: rgba(245, 158, 11, 0.3);">
+            🔥 Warming Ramp Active
+          </span>
+        {% endif %}
+      </div>
+      <div style="font-family: 'JetBrains Mono', monospace; font-size: 13px;">
+        <span style="color: #ffffff; font-weight: 700;">{{ u.sent }}</span>
+        <span class="muted">/ {{ u.cap }} today</span>
+        <span class="muted" style="font-size: 11.5px; margin-left: 6px;">({{ u.pct }}%)</span>
+      </div>
+    </div>
+    <div class="bar">
+      <div class="fill" style="width: {{ u.pct }}%;"></div>
+    </div>
+  </div>
 {% else %}
-<p class="muted">No accounts connected yet. <a href="/accounts">Add one →</a></p>
+  <div class="card" style="text-align: center; padding: 32px 20px;">
+    <div style="font-size: 24px; margin-bottom: 8px;">🔌</div>
+    <strong>No sender accounts connected.</strong>
+    <p class="muted" style="font-size: 13px; margin: 6px 0 16px 0;">Connect your SMTP/IMAP credentials to start sending outbound emails.</p>
+    <a class="btn primary small" href="/accounts/new">+ Connect Sender Account</a>
+  </div>
 {% endfor %}
 {% endblock %}

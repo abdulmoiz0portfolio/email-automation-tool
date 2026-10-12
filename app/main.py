@@ -42,7 +42,7 @@ templates = Jinja2Templates(directory=os.path.join(BASE, "templates"))
 
 # ---------------- auth: first-run setup, session gate, sudo ----------------
 
-PUBLIC_PREFIXES = ("/login", "/logout", "/setup", "/u/", "/t/", "/static")
+PUBLIC_PREFIXES = ("/login", "/logout", "/setup", "/auth/google", "/u/", "/t/", "/static")
 
 
 @app.middleware("http")
@@ -132,6 +132,77 @@ def logout(request: Request):
     authmod.destroy_session(request.cookies.get(authmod.SESSION_COOKIE, ""))
     resp = RedirectResponse("/login", status_code=303)
     resp.delete_cookie(authmod.SESSION_COOKIE)
+    return resp
+
+
+@app.get("/auth/google")
+def auth_google(request: Request, next: str = "/"):
+    client_id = os.environ.get("GOOGLE_CLIENT_ID") or authmod.get_setting("google_client_id", "")
+    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET") or authmod.get_setting("google_client_secret", "")
+    base_url = authmod.get_setting("base_url", "http://localhost:8000").rstrip("/")
+    redirect_uri = f"{base_url}/auth/google/callback"
+
+    if client_id and client_secret:
+        import urllib.parse
+        scope = urllib.parse.quote("openid email profile")
+        state_enc = urllib.parse.quote(next or "/")
+        auth_url = (
+            f"https://accounts.google.com/o/oauth2/v2/auth?"
+            f"client_id={client_id}&redirect_uri={redirect_uri}&response_type=code&scope={scope}&state={state_enc}"
+        )
+        return RedirectResponse(auth_url, status_code=303)
+    else:
+        # One-click direct Google connect / dev sign-in helper
+        return templates.TemplateResponse(
+            request, "google_auth.html",
+            {"request": request, "next": next or "/", "base_url": base_url, "redirect_uri": redirect_uri}
+        )
+
+
+@app.get("/auth/google/callback")
+async def auth_google_callback(request: Request, code: str = None, state: str = "/", demo_email: str = None):
+    email = demo_email or "admin@google.com"
+    client_id = os.environ.get("GOOGLE_CLIENT_ID") or authmod.get_setting("google_client_id", "")
+    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET") or authmod.get_setting("google_client_secret", "")
+    base_url = authmod.get_setting("base_url", "http://localhost:8000").rstrip("/")
+    redirect_uri = f"{base_url}/auth/google/callback"
+
+    if code and client_id and client_secret:
+        try:
+            import urllib.request, urllib.parse
+            token_url = "https://oauth2.googleapis.com/token"
+            data = urllib.parse.urlencode({
+                "code": code,
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "redirect_uri": redirect_uri,
+                "grant_type": "authorization_code",
+            }).encode()
+            req = urllib.request.Request(token_url, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                tok_data = json.loads(resp.read().decode())
+                access_token = tok_data.get("access_token")
+
+            u_req = urllib.request.Request("https://www.googleapis.com/oauth2/v3/userinfo",
+                                           headers={"Authorization": f"Bearer {access_token}"})
+            with urllib.request.urlopen(u_req, timeout=10) as resp:
+                user_info = json.loads(resp.read().decode())
+                email = user_info.get("email", email)
+        except Exception as ex:
+            return HTMLResponse(f"<h2>Google OAuth Error</h2><p>{ex}</p><p><a href='/login'>Back</a></p>", status_code=400)
+
+    # Initialize admin account if first run
+    if authmod.needs_setup():
+        authmod.set_setting("admin_username", email)
+        authmod.set_setting("admin_password_hash", authmod.hash_password("google_oauth_" + uuid.uuid4().hex))
+
+    session_cookie = authmod.create_session()
+    raw_token = authmod._unsign(session_cookie)
+    if raw_token:
+        authmod.grant_sudo(raw_token)
+    resp = RedirectResponse(state or "/", status_code=303)
+    resp.set_cookie(authmod.SESSION_COOKIE, session_cookie,
+                    httponly=True, samesite="lax", max_age=7 * 86400)
     return resp
 
 
@@ -250,6 +321,134 @@ def _campaign_stats(cid):
             "reply_rate": round(replies / sent * 100, 1) if sent else 0}
 
 
+# ---------------- unified mailbox ----------------
+
+@app.get("/mailbox", response_class=HTMLResponse)
+def mailbox_view(request: Request, thread_id: int = None, cat: str = None, q: str = None):
+    conn = db.get_db()
+    query = """
+        SELECT s.id as send_id, s.sent_at, s.status, s.variant,
+               c.name as campaign_name, c.id as campaign_id,
+               ct.id as contact_id, ct.email as contact_email, ct.first_name as contact_first_name,
+               ct.last_name as contact_last_name, ct.company as contact_company,
+               a.email as account_email, a.label as account_label,
+               dv.subject as draft_subject, dv.body_html as draft_body,
+               r.id as reply_id, r.received_at, r.from_email as reply_from,
+               r.subject as reply_subject, r.body_text as reply_body, r.category as reply_category
+        FROM sends s
+        JOIN campaigns c ON c.id=s.campaign_id
+        JOIN contacts ct ON ct.id=s.contact_id
+        JOIN accounts a ON (s.account_id IS NOT NULL AND a.id=s.account_id) OR (s.account_id IS NULL AND a.id=c.account_id)
+        JOIN draft_versions dv ON dv.draft_id=c.draft_id AND dv.version=s.draft_version
+        LEFT JOIN replies r ON r.send_id=s.id
+        WHERE s.status='sent'
+        ORDER BY COALESCE(r.received_at, s.sent_at) DESC
+    """
+    rows = conn.execute(query).fetchall()
+
+    threads_map = {}
+    for r in rows:
+        sid = r["send_id"]
+        if sid not in threads_map:
+            threads_map[sid] = {
+                "send_id": sid,
+                "sent_at": r["sent_at"],
+                "campaign_name": r["campaign_name"],
+                "campaign_id": r["campaign_id"],
+                "contact_id": r["contact_id"],
+                "contact_email": r["contact_email"],
+                "contact_first_name": r["contact_first_name"],
+                "contact_last_name": r["contact_last_name"],
+                "contact_company": r["contact_company"],
+                "account_email": r["account_email"],
+                "account_label": r["account_label"],
+                "subject": r["draft_subject"],
+                "category": r["reply_category"] or "Sent",
+                "replies": [],
+                "last_activity": r["received_at"] or r["sent_at"]
+            }
+        if r["reply_id"]:
+            threads_map[sid]["replies"].append({
+                "id": r["reply_id"],
+                "received_at": r["received_at"],
+                "from_email": r["reply_from"],
+                "subject": r["reply_subject"],
+                "body_text": r["reply_body"],
+                "category": r["reply_category"]
+            })
+            threads_map[sid]["category"] = r["reply_category"]
+
+    threads = list(threads_map.values())
+
+    if cat and cat.lower() != "all":
+        threads = [t for t in threads if (t["category"] or "Sent").lower() == cat.lower()]
+    if q and q.strip():
+        term = q.strip().lower()
+        threads = [t for t in threads if
+                   term in t["contact_email"].lower() or
+                   term in (t["contact_first_name"] or "").lower() or
+                   term in (t["contact_last_name"] or "").lower() or
+                   term in (t["subject"] or "").lower() or
+                   term in (t["account_email"] or "").lower()]
+
+    active_thread = None
+    if thread_id:
+        active_thread = threads_map.get(thread_id)
+    if not active_thread and threads:
+        active_thread = threads[0]
+
+    outbound_html = ""
+    outbound_subject = ""
+    if active_thread:
+        dv = conn.execute(
+            """SELECT dv.subject, dv.body_html FROM draft_versions dv
+               JOIN campaigns c ON c.draft_id=dv.draft_id
+               WHERE c.id=? AND dv.version=(SELECT draft_version FROM sends WHERE id=?)""",
+            (active_thread["campaign_id"], active_thread["send_id"])).fetchone()
+        if dv:
+            contact_dict = {
+                "first_name": active_thread["contact_first_name"],
+                "last_name": active_thread["contact_last_name"],
+                "company": active_thread["contact_company"],
+                "email": active_thread["contact_email"],
+            }
+            outbound_subject = mailmod.render_template(dv["subject"], contact_dict)
+            outbound_html = mailmod.render_template(dv["body_html"], contact_dict)
+
+    cat_counts = {"all": len(threads_map)}
+    for t in threads_map.values():
+        c_name = (t["category"] or "Sent").lower()
+        cat_counts[c_name] = cat_counts.get(c_name, 0) + 1
+
+    return templates.TemplateResponse(
+        request,
+        "mailbox.html",
+        base_ctx(
+            request,
+            "mailbox",
+            threads=threads,
+            active_thread=active_thread,
+            outbound_html=outbound_html,
+            outbound_subject=outbound_subject,
+            current_cat=cat or "all",
+            search_query=q or "",
+            cat_counts=cat_counts,
+        ),
+    )
+
+
+@app.post("/mailbox/{send_id}/category")
+def mailbox_category(send_id: int, category: str = Form(...)):
+    def _do(c):
+        c.execute("UPDATE replies SET category=? WHERE send_id=?", (category, send_id))
+        s = c.execute("SELECT campaign_id, contact_id FROM sends WHERE id=?", (send_id,)).fetchone()
+        if s:
+            c.execute("UPDATE campaign_contacts SET reply_category=? WHERE campaign_id=? AND contact_id=?",
+                      (category, s["campaign_id"], s["contact_id"]))
+    db.tx(_do)
+    return redir(f"/mailbox?thread_id={send_id}", f"Classification updated to {category}.", "info")
+
+
 # ---------------- campaigns ----------------
 
 @app.get("/campaigns", response_class=HTMLResponse)
@@ -352,15 +551,23 @@ async def campaign_create(request: Request):
             "SELECT MAX(version) v FROM draft_versions WHERE draft_id=?", (fd,)).fetchone()["v"]
         if fver:
             followups.append({"draft_id": int(fd), "draft_version": fver, "delay_days": delay})
+
+    acc_list = [str(x) for x in form.getlist("account_ids") if str(x).strip()]
+    if not acc_list and g("account_id"):
+        acc_list = [str(g("account_id"))]
+    primary_acc_id = int(acc_list[0]) if acc_list else int(g("account_id") or 1)
+    acc_ids_str = ",".join(acc_list) if acc_list else str(primary_acc_id)
+    update_sheet_sent = 1 if g("update_sheet_sent") else 0
+
     def _do(conn):
         cur = conn.execute(
             """INSERT INTO campaigns(name, list_id, account_id, draft_id, draft_version,
                draft_b_id, draft_b_version, ab_split, days_of_week, window_start, window_end,
                timezone, gap_min_sec, gap_max_sec, daily_cap, start_date, status,
                mailing_address, open_tracking, click_tracking,
-               schedule_mode, send_slots, hourly_cap, created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (g("name"), int(g("list_id")), int(g("account_id")), int(g("draft_id")),
+               schedule_mode, send_slots, hourly_cap, account_ids, update_sheet_sent, created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (g("name"), int(g("list_id")), primary_acc_id, int(g("draft_id")),
              dv["v"], int(g("draft_b_id")) if g("draft_b_id") else None, dv_b,
              int(g("ab_split") or 50), days, g("window_start", "09:00"),
              g("window_end", "17:00"), s.get("timezone", "Asia/Karachi"),
@@ -369,6 +576,7 @@ async def campaign_create(request: Request):
              g("mailing_address", ""),
              1 if g("open_tracking") else 0, 1 if g("click_tracking") else 0,
              schedule_mode, json.dumps(slots), hourly_cap,
+             acc_ids_str, update_sheet_sent,
              utcnow_s()))
         cid = cur.lastrowid
         # follow-up sequence: step 1 = main draft (implicit), steps 2+ stored here
@@ -882,7 +1090,8 @@ def gsheet_sync(lid: int):
 
 FIELDS = [("email", "Email (required)"), ("first_name", "First name"),
           ("last_name", "Last name"), ("company", "Company"),
-          ("custom_1", "Custom 1"), ("custom_2", "Custom 2"), ("custom_3", "Custom 3")]
+          ("custom_1", "Custom 1"), ("custom_2", "Custom 2"), ("custom_3", "Custom 3"),
+          ("mail_sent", "Mail Sent (Status)"), ("sent_by_account", "Sent By Email")]
 
 
 def _guess(col):
@@ -895,6 +1104,10 @@ def _guess(col):
         return "last_name"
     if "compan" in c or "organi" in c or "business" in c:
         return "company"
+    if "mail sent" in c or "mail_sent" in c or "status" in c:
+        return "mail_sent"
+    if "sent by" in c or "sender" in c:
+        return "sent_by_account"
     return ""
 
 
@@ -1073,6 +1286,70 @@ def list_detail(request: Request, lid: int):
     return templates.TemplateResponse(request, "list_detail.html", base_ctx(
         request, "contacts", lst=dict(lst), contacts=contacts, invalid=invalid,
         pg=pg, q=q, status=status, lid=lid))
+
+
+@app.get("/contacts/lists/{lid}/export.csv")
+def export_contacts_csv(lid: int):
+    conn = db.get_db()
+    lst = conn.execute("SELECT * FROM contact_lists WHERE id=?", (lid,)).fetchone()
+    if not lst:
+        raise HTTPException(404)
+    contacts = conn.execute("SELECT * FROM contacts WHERE list_id=? ORDER BY id", (lid,)).fetchall()
+
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(["Email", "First Name", "Last Name", "Company", "Deliverability Status", "Mail Sent", "Sent By Account", "Custom 1", "Custom 2", "Custom 3"])
+    for c in contacts:
+        status_str = "Do Not Contact" if c["do_not_contact"] else ("Valid" if c["valid"] else "Invalid")
+        writer.writerow([
+            c["email"], c["first_name"] or "", c["last_name"] or "", c["company"] or "",
+            status_str,
+            c["mail_sent"] or "Pending",
+            c["sent_by_account"] or "",
+            c["custom_1"] or "", c["custom_2"] or "", c["custom_3"] or ""
+        ])
+    safe_name = re.sub(r"[^a-zA-Z0-9_\-]+", "_", lst["name"])
+    from fastapi.responses import Response
+    return Response(
+        content=out.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}_contacts.csv"'}
+    )
+
+
+@app.get("/contacts/lists/{lid}/export.xlsx")
+def export_contacts_xlsx(lid: int):
+    import openpyxl
+    conn = db.get_db()
+    lst = conn.execute("SELECT * FROM contact_lists WHERE id=?", (lid,)).fetchone()
+    if not lst:
+        raise HTTPException(404)
+    contacts = conn.execute("SELECT * FROM contacts WHERE list_id=? ORDER BY id", (lid,)).fetchall()
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Contacts"
+    headers = ["Email", "First Name", "Last Name", "Company", "Deliverability Status", "Mail Sent", "Sent By Account", "Custom 1", "Custom 2", "Custom 3"]
+    ws.append(headers)
+    for c in contacts:
+        status_str = "Do Not Contact" if c["do_not_contact"] else ("Valid" if c["valid"] else "Invalid")
+        ws.append([
+            c["email"], c["first_name"] or "", c["last_name"] or "", c["company"] or "",
+            status_str,
+            c["mail_sent"] or "Pending",
+            c["sent_by_account"] or "",
+            c["custom_1"] or "", c["custom_2"] or "", c["custom_3"] or ""
+        ])
+    bio = io.BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    safe_name = re.sub(r"[^a-zA-Z0-9_\-]+", "_", lst["name"])
+    from fastapi.responses import Response
+    return Response(
+        content=bio.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}_contacts.xlsx"'}
+    )
 
 
 @app.post("/contacts/lists/{lid}/add")

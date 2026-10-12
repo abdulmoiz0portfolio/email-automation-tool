@@ -1,35 +1,109 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="row-between"><h1>Contact lists</h1>
-<form id="uploadform" method="post" action="/contacts/upload" enctype="multipart/form-data" class="inline-form">
-<input type="file" id="fileinput" name="file" accept=".xlsx,.csv" required>
-<select id="sheetselect" name="sheet" class="hidden" title="Pick the worksheet to import"></select>
-<input type="text" id="listname" name="name" placeholder="List name" required>
-<button class="btn primary" id="uploadbtn">Upload → map columns</button>
-<span id="stagestatus" class="muted"></span>
-</form>
-<form id="gsheetform" method="post" action="/contacts/gsheet/fetch" class="inline-form" style="margin-top:8px">
-<input type="text" id="gsheeturl" name="url" placeholder="Paste Google Sheet share link…" size="42" required>
-<select id="gsheettab" name="tab" class="hidden" title="Pick the worksheet tab"></select>
-<input type="text" id="gsheettabmanual" name="tab" placeholder="Tab name (e.g. Sheet1)" class="hidden" size="16">
-<input type="text" id="gsheetname" name="name" placeholder="List name" required>
-<button class="btn primary" id="gsheetbtn" type="submit">Fetch → map columns</button>
-<span id="gsheetstatus" class="muted"></span>
-{% if not gsheet_key_set %}<span class="muted">No API key set: sheet must be shared as "Anyone with the link" (key in <a href="/settings">Settings</a>).</span>{% endif %}
-</form></div>
-<form method="get" action="/contacts" class="inline-form">
-<input type="text" name="q" value="{{ q }}" placeholder="Search lists…">
-<button class="btn">Search</button>
-{% if q %}<a class="btn" href="/contacts">Clear</a>{% endif %}
-</form>
-<table><tr><th>Name</th><th>Contacts</th><th>Invalid</th><th>Uploaded</th><th></th></tr>
-{% for l in lists %}
-<tr><td><a href="/contacts/lists/{{ l.id }}">{{ l.name }}</a></td><td>{{ l.count }}</td><td>{{ l.invalid }}</td><td>{{ l.created_at[:10] }}</td>
-<td><form method="post" action="/contacts/lists/{{ l.id }}/delete" onsubmit="return confirm('Delete this list and ALL its contacts?');"><button class="btn danger small">Delete</button></form></td></tr>
-{% else %}<tr><td colspan="5" class="muted">No lists yet.</td></tr>{% endfor %}
+<div class="row-between" style="margin-bottom: 24px;">
+  <div>
+    <h1>Audience &amp; Contact Lists</h1>
+    <p class="muted" style="margin: 4px 0 0 0; font-size: 13.5px;">Manage contact lists, import CSV/Excel spreadsheets, and sync live Google Sheets.</p>
+  </div>
+</div>
+
+<div class="card" style="margin-bottom: 20px;">
+  <h3>📥 Upload Local File (CSV / Excel)</h3>
+  <form id="uploadform" method="post" action="/contacts/upload" enctype="multipart/form-data" class="inline-form" style="flex-wrap: wrap; margin-top: 10px;">
+    <input type="text" id="listname" name="name" placeholder="Audience List Name (e.g. Q4 SaaS Founders)" required style="flex: 1; min-width: 220px;">
+    <input type="file" id="fileinput" name="file" accept=".xlsx,.csv" required style="flex: 1; min-width: 180px;">
+    <select id="sheetselect" name="sheet" class="hidden" title="Pick the worksheet to import" style="width: auto;"></select>
+    <button class="btn primary" id="uploadbtn">Upload → Map Columns</button>
+    <span id="stagestatus" class="muted" style="font-size: 12.5px;"></span>
+  </form>
+</div>
+
+<div class="card" style="margin-bottom: 24px; background: rgba(59, 130, 246, 0.04); border-color: rgba(59, 130, 246, 0.2);">
+  <h3>📊 Sync from Google Sheets</h3>
+  <p class="muted" style="margin: 4px 0 12px 0; font-size: 12.5px;">
+    Paste any Google Sheet shareable link. The tool will parse headers, lets you choose tabs, and enables one-click live upsert sync.
+  </p>
+  <form id="gsheetform" method="post" action="/contacts/gsheet/fetch" class="inline-form" style="flex-wrap: wrap;">
+    <input type="text" id="gsheetname" name="name" placeholder="Target List Name" required style="flex: 1; min-width: 180px;">
+    <input type="text" id="gsheeturl" name="url" placeholder="https://docs.google.com/spreadsheets/d/..." style="flex: 2; min-width: 260px;" required>
+    <select id="gsheettab" name="tab" class="hidden" title="Pick the worksheet tab" style="width: auto;"></select>
+    <input type="text" id="gsheettabmanual" name="tab" placeholder="Tab name (e.g. Sheet1)" class="hidden" style="width: 160px;">
+    <button class="btn primary" id="gsheetbtn" type="submit">Fetch → Map Columns</button>
+    <span id="gsheetstatus" class="muted" style="font-size: 12.5px;"></span>
+  </form>
+  {% if not gsheet_key_set %}
+    <div class="muted" style="font-size: 12px; margin-top: 8px;">
+      💡 No Google API key set: sheet must be shared as "Anyone with the link can view". You can also add a Sheets API Key in <a href="/settings" style="color: #60a5fa;">Settings</a>.
+    </div>
+  {% endif %}
+</div>
+
+<div class="card" style="margin-bottom: 20px;">
+  <form method="get" action="/contacts" class="inline-form" style="margin: 0;">
+    <input type="text" name="q" value="{{ q or '' }}" placeholder="Search audience lists…" style="flex: 1; min-width: 220px;">
+    <button class="btn primary">Search</button>
+    {% if q %}<a class="btn" href="/contacts">Clear</a>{% endif %}
+  </form>
+</div>
+
+<h2>Audience Lists</h2>
+<table>
+  <thead>
+    <tr>
+      <th>List Title</th>
+      <th>Valid Contacts</th>
+      <th>Quarantined / Invalid</th>
+      <th>Uploaded Date</th>
+      <th style="text-align: right;">Action</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for l in lists %}
+    <tr>
+      <td>
+        <strong style="font-size: 14.5px;">
+          <a href="/contacts/lists/{{ l.id }}">{{ l.name }}</a>
+        </strong>
+      </td>
+      <td>
+        <span class="pill active" style="font-family: 'JetBrains Mono', monospace;">
+          {{ l.count }} contacts
+        </span>
+      </td>
+      <td>
+        {% if l.invalid > 0 %}
+          <span class="pill failed" style="font-family: 'JetBrains Mono', monospace;">
+            {{ l.invalid }} quarantined
+          </span>
+        {% else %}
+          <span class="muted" style="font-size: 12px;">0 errors</span>
+        {% endif %}
+      </td>
+      <td class="muted">{{ l.created_at[:10] }}</td>
+      <td style="text-align: right;">
+        <div style="display: inline-flex; gap: 8px;">
+          <a class="btn small" href="/contacts/lists/{{ l.id }}">View Records →</a>
+          <form method="post" action="/contacts/lists/{{ l.id }}/delete" style="display:inline" onsubmit="return confirm('Delete this list and ALL its associated contacts?');">
+            <button class="btn danger small">Delete</button>
+          </form>
+        </div>
+      </td>
+    </tr>
+  {% else %}
+    <tr>
+      <td colspan="5" class="muted" style="text-align: center; padding: 48px 24px;">
+        <div style="font-size: 28px; margin-bottom: 8px;">👥</div>
+        <strong>No audience lists uploaded yet.</strong>
+        <p style="margin: 6px 0 16px 0; font-size: 13px;">Upload your CSV or Excel file above to get started.</p>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
 </table>
+
 {% set base = '/contacts' %}{% include "_pager.html" %}
 {% endblock %}
+
 {% block scripts %}
 <script>
 const fileInput = document.getElementById('fileinput');
@@ -68,8 +142,7 @@ fileInput.addEventListener('change', async () => {
 });
 
 uploadForm.addEventListener('submit', async (e) => {
-  // If we staged the file and the user picked a sheet, use the staged path.
-  if (!stagedUid) return; // plain form post (active sheet) — server handles it
+  if (!stagedUid) return;
   e.preventDefault();
   const btn = document.getElementById('uploadbtn');
   btn.disabled = true;
@@ -105,7 +178,6 @@ gsheetUrl.addEventListener('change', async () => {
   const url = gsheetUrl.value.trim();
   if (!url) return;
   if (!gsheetHasKey) {
-    // no key: cannot list tabs — user types the tab name (blank = first sheet)
     gsheetTabManual.classList.remove('hidden'); gsheetTabManual.disabled = false;
     gsheetStatus.textContent = 'Tab name optional — blank uses the first sheet';
     return;

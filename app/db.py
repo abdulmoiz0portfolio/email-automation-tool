@@ -208,6 +208,11 @@ _MIGRATIONS = [
     ("contact_lists", "gsheet_url", "TEXT"),
     ("contact_lists", "gsheet_synced_at", "TEXT"),
     ("contact_lists", "gsheet_mapping", "TEXT"),
+    ("contacts", "mail_sent", "TEXT NOT NULL DEFAULT ''"),
+    ("contacts", "sent_by_account", "TEXT NOT NULL DEFAULT ''"),
+    ("campaigns", "update_sheet_sent", "INTEGER NOT NULL DEFAULT 0"),
+    ("campaigns", "account_ids", "TEXT NOT NULL DEFAULT ''"),
+    ("sends", "account_id", "INTEGER"),
 ]
 
 

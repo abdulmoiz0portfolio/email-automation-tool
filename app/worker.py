@@ -222,14 +222,18 @@ def release_claim(cc_id, to_status="queued"):
         (to_status, cc_id)))
 
 
-def send_one(campaign, cc):
+def send_one(campaign, cc, account=None):
     """Send a single email. Returns (ok, info)."""
+    campaign = dict(campaign)
     conn = db.get_db()
-    account = conn.execute("SELECT * FROM accounts WHERE id=?",
-                           (campaign["account_id"],)).fetchone()
-    if not account:
-        return False, "account missing"
-    account = _account_dict(account)
+    if account is None:
+        account = conn.execute("SELECT * FROM accounts WHERE id=?",
+                               (campaign["account_id"],)).fetchone()
+        if not account:
+            return False, "account missing"
+        account = _account_dict(account)
+    else:
+        account = _account_dict(account)
     contact = {k: cc[k] for k in
                ("email", "first_name", "last_name", "company",
                 "custom_1", "custom_2", "custom_3", "custom_fields", "contact_id")}
@@ -307,10 +311,10 @@ def send_one(campaign, cc):
         def _ok(c):
             c.execute(
                 """INSERT INTO sends(campaign_id, contact_id, draft_version, variant,
-                   message_id, unsub_token, sent_at, status, smtp_status)
-                   VALUES(?,?,?,?,?,?,?, 'sent', ?)""",
+                   message_id, unsub_token, sent_at, status, smtp_status, account_id)
+                   VALUES(?,?,?,?,?,?,?, 'sent', ?, ?)""",
                 (campaign["id"], cc["contact_id"], draft_ver, variant,
-                 message_id, token, now_s, resp[:300]))
+                 message_id, token, now_s, resp[:300], account["id"]))
             if next_step:
                 due = utcnow() + timedelta(days=int(next_step["delay_days"]))
                 c.execute(
@@ -321,6 +325,13 @@ def send_one(campaign, cc):
                 c.execute(
                     "UPDATE campaign_contacts SET status='sent', sent_at=?, draft_version=?, variant=? WHERE id=?",
                     (now_s, draft_ver, variant, cc["id"]))
+
+            # Optional: mark sheet row slot with 'Sent' and which email was used
+            if int(campaign.get("update_sheet_sent") or 0):
+                c.execute(
+                    "UPDATE contacts SET mail_sent='Sent', sent_by_account=? WHERE id=?",
+                    (account["email"], cc["contact_id"]))
+
             gap = random.randint(int(campaign["gap_min_sec"]), int(campaign["gap_max_sec"]))
             c.execute("UPDATE campaigns SET next_due_at=? WHERE id=?",
                       (iso(utcnow() + timedelta(seconds=gap)), campaign["id"]))
@@ -333,10 +344,10 @@ def send_one(campaign, cc):
         def _fail(c):
             c.execute(
                 """INSERT INTO sends(campaign_id, contact_id, draft_version, variant,
-                   message_id, unsub_token, sent_at, status, smtp_status)
-                   VALUES(?,?,?,?,?,?,?, 'failed', ?)""",
+                   message_id, unsub_token, sent_at, status, smtp_status, account_id)
+                   VALUES(?,?,?,?,?,?,?, 'failed', ?, ?)""",
                 (campaign["id"], cc["contact_id"], draft_ver, variant,
-                 message_id, token, now_s, resp[:300]))
+                 message_id, token, now_s, resp[:300], account["id"]))
             c.execute("UPDATE campaign_contacts SET status='queued' WHERE id=?", (cc["id"],))
         db.tx(_fail)
         if "AUTH FAILED" in resp:
@@ -351,9 +362,40 @@ def send_one(campaign, cc):
         return False, resp[:200]
 
 
+def _pick_campaign_account(camp, now):
+    """Pick an available account from the campaign's account pool with lowest daily sends."""
+    camp = dict(camp)
+    conn = db.get_db()
+    acc_ids_str = camp.get("account_ids") or ""
+    cand_ids = [int(x) for x in acc_ids_str.split(",") if x.strip()] if acc_ids_str else [camp["account_id"]]
+    if not cand_ids:
+        cand_ids = [camp["account_id"]]
+
+    available = []
+    for aid in cand_ids:
+        acc = conn.execute("SELECT * FROM accounts WHERE id=?", (aid,)).fetchone()
+        if not acc or acc["status"] not in ("connected", "unknown"):
+            continue
+        acc = dict(acc)
+        cap, warming = effective_daily_cap(acc, camp, now)
+        sent_today = sent_today_count(acc["id"], iso(now))
+        if sent_today >= cap:
+            continue
+        ahcap = int(acc.get("hourly_cap") or 0)
+        if ahcap and sent_last_hour_account(acc["id"]) >= ahcap:
+            continue
+        available.append((sent_today, acc))
+
+    if not available:
+        return None
+    available.sort(key=lambda x: x[0])
+    return available[0][1]
+
+
 def _process_one_campaign(camp, now):
     """Send a single due email for one campaign. Holds a per-campaign lock so
     parallel account workers never violate the campaign's gap pacing."""
+    camp = dict(camp)
     with _campaign_lock(camp["id"]):
         # start date gate
         try:
@@ -375,20 +417,13 @@ def _process_one_campaign(camp, now):
             return
 
         conn = db.get_db()
-        account = conn.execute("SELECT * FROM accounts WHERE id=?",
-                               (camp["account_id"],)).fetchone()
-        if not account or account["status"] not in ("connected", "unknown"):
+        account = _pick_campaign_account(camp, now)
+        if not account:
             return
-        account = dict(account)
-        cap, warming = effective_daily_cap(account, camp, now)
-        if sent_today_count(account["id"], iso(now)) >= cap:
-            return
-        # hourly caps: campaign-level and account-level
+
+        # hourly caps: campaign-level
         hcap = int(camp.get("hourly_cap") or 0)
         if hcap and sent_last_hour_count(camp["id"]) >= hcap:
-            return
-        ahcap = int(account.get("hourly_cap") or 0)
-        if ahcap and sent_last_hour_account(account["id"]) >= ahcap:
             return
 
         cc = claim_next_contact(camp["id"], now)
@@ -401,7 +436,7 @@ def _process_one_campaign(camp, now):
                 db.tx(lambda c: c.execute(
                     "UPDATE campaigns SET status='completed' WHERE id=?", (camp["id"],)))
             return
-        send_one(camp, cc)
+        send_one(camp, cc, account=account)
 
 
 def process_campaigns(now=None):
@@ -412,8 +447,11 @@ def process_campaigns(now=None):
     campaigns = conn.execute(
         "SELECT * FROM campaigns WHERE status IN ('active','scheduled')").fetchall()
     by_account = {}
-    for camp in campaigns:
-        by_account.setdefault(camp["account_id"], []).append(dict(camp))
+    for camp_row in campaigns:
+        camp = dict(camp_row)
+        acc_ids = [int(x) for x in (camp.get("account_ids") or "").split(",") if x.strip()] or [camp["account_id"]]
+        for aid in acc_ids:
+            by_account.setdefault(aid, []).append(camp)
     ex = _executor()
     futures = []
     for camps in by_account.values():

@@ -3,35 +3,81 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{ title or "Email Tool" }} — Automatixes Email Automation</title>
+<title>{{ title or "Email Tool" }} — Automatixes Email Outreach</title>
 <link rel="stylesheet" href="/static/style.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 </head>
 <body>
 <div class="layout">
 <aside class="sidebar">
-  <div class="brand">📧 Email Tool</div>
+  <div class="brand">
+    <div class="brand-icon">⚡</div>
+    <div>
+      <div class="brand-text">Automatixes</div>
+    </div>
+    <span class="brand-badge">PRO</span>
+  </div>
   <nav>
-    <a href="/" class="{{ 'active' if active=='dashboard' }}">Dashboard</a>
-    <a href="/campaigns" class="{{ 'active' if active=='campaigns' }}">Campaigns</a>
-    <a href="/contacts" class="{{ 'active' if active=='contacts' }}">Contacts</a>
-    <a href="/drafts" class="{{ 'active' if active=='drafts' }}">Drafts</a>
-    <a href="/accounts" class="{{ 'active' if active=='accounts' }}">Accounts</a>
-    <a href="/suppression" class="{{ 'active' if active=='suppression' }}">Suppression List</a>
-    <a href="/deliverability" class="{{ 'active' if active=='deliverability' }}">Deliverability</a>
-    <a href="/sends" class="{{ 'active' if active=='sends' }}">Send Log</a>
-    <a href="/settings" class="{{ 'active' if active=='settings' }}">Settings</a>
-    <a href="/logout">Log out</a>
+    <a href="/" class="{{ 'active' if active=='dashboard' }}">
+      <span>📊</span> Dashboard
+    </a>
+    <a href="/campaigns" class="{{ 'active' if active=='campaigns' }}">
+      <span>🚀</span> Campaigns
+    </a>
+    <a href="/mailbox" class="{{ 'active' if active=='mailbox' }}">
+      <span>📬</span> Mailbox
+    </a>
+    <a href="/contacts" class="{{ 'active' if active=='contacts' }}">
+      <span>👥</span> Contacts
+    </a>
+    <a href="/drafts" class="{{ 'active' if active=='drafts' }}">
+      <span>📝</span> Drafts
+    </a>
+    <a href="/accounts" class="{{ 'active' if active=='accounts' }}">
+      <span>🔌</span> Accounts
+    </a>
+    <a href="/warmup" class="{{ 'active' if active=='warmup' }}">
+      <span>🔥</span> Warm-up
+    </a>
+    <a href="/deliverability" class="{{ 'active' if active=='deliverability' }}">
+      <span>🛡️</span> Deliverability
+    </a>
+    <a href="/sends" class="{{ 'active' if active=='sends' }}">
+      <span>📜</span> Send Log
+    </a>
+    <a href="/suppression" class="{{ 'active' if active=='suppression' }}">
+      <span>🛑</span> Suppression List
+    </a>
+    <a href="/settings" class="{{ 'active' if active=='settings' }}">
+      <span>⚙️</span> Settings
+    </a>
+    <a href="/logout" style="margin-top: 16px; color: #f87171;">
+      <span>🚪</span> Log out
+    </a>
   </nav>
-  <div class="sidefoot">Automatixes · self-hosted</div>
+  <div class="sidefoot">
+    <div><span class="status-dot"></span>Worker Active</div>
+    <span style="opacity: 0.6">v2.1</span>
+  </div>
 </aside>
 <main>
 {% if paused_campaigns %}
 <div class="banner warn">
-  ⏸ Paused: {% for c in paused_campaigns %}<strong>{{ c.name }}</strong> — {{ c.pause_reason or "paused" }}{% if not loop.last %} · {% endif %}{% endfor %}
+  <span>⚠️</span>
+  <div>
+    <strong>Auto-Paused Campaigns:</strong>
+    {% for c in paused_campaigns %}
+      <span><strong>{{ c.name }}</strong> ({{ c.pause_reason or "paused" }}){% if not loop.last %} · {% endif %}</span>
+    {% endfor %}
+  </div>
 </div>
 {% endif %}
 {% if flash %}
-<div class="banner {{ flash_kind or 'info' }}">{{ flash }}</div>
+<div class="banner {{ flash_kind or 'info' }}">
+  <span>ℹ️</span>
+  <div>{{ flash }}</div>
+</div>
 {% endif %}
 {% block content %}{% endblock %}
 </main>

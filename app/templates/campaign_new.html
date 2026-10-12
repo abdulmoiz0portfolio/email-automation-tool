@@ -19,12 +19,27 @@
 </div>
 
 <div class="wstep hidden" data-step="2">
-  <h2>Pick the sending account</h2>
+  <div class="row-between" style="align-items: center; margin-bottom: 8px;">
+    <h2 style="margin: 0;">Pick sending account(s)</h2>
+    <div style="display: flex; gap: 8px;">
+      <button type="button" class="btn small" id="selectAllAccounts">Select All</button>
+      <button type="button" class="btn small" id="deselectAllAccounts">Clear</button>
+    </div>
+  </div>
+  <p class="muted" style="margin-top: 0; margin-bottom: 14px; font-size: 13px;">
+    Select one or multiple sender accounts. Emails will be rotated evenly across accounts without duplicates.
+  </p>
+  <input type="hidden" name="account_id" id="hidden_account_id" value="">
   {% for a in accounts %}
-  <label class="radio-card"><input type="radio" name="account_id" value="{{ a.id }}" required>
-    <strong>{{ a.label }}</strong> <span class="muted">{{ a.email }}</span>
-    <span class="pill {{ a.status }}">{{ a.status }}</span>
-    {% if a.warming %}<span class="muted">· 🔥 warm-up: {{ a.warm_cap }}/day</span>{% endif %}</label>
+  <label class="radio-card" style="display: flex; align-items: center; gap: 12px;">
+    <input type="checkbox" name="account_ids" value="{{ a.id }}" class="account-chk" {% if loop.first %}checked{% endif %}>
+    <div style="flex: 1; display: flex; align-items: center; gap: 10px;">
+      <strong style="color: #ffffff;">{{ a.label }}</strong>
+      <span class="muted" style="font-family: 'JetBrains Mono', monospace; font-size: 12.5px;">{{ a.email }}</span>
+      <span class="pill {{ a.status }}">{{ a.status }}</span>
+      {% if a.warming %}<span class="pill paused">🔥 warm-up: {{ a.warm_cap }}/day</span>{% endif %}
+    </div>
+  </label>
   {% else %}<p class="muted">No accounts — <a href="/accounts">connect one first</a>.</p>{% endfor %}
 </div>
 
@@ -86,6 +101,18 @@
     <label>Start date <input type="date" name="start_date" value="{{ today }}" required></label>
     <label>Physical mailing address <input type="text" name="mailing_address" value="{{ physical_address }}" placeholder="Required for the unsubscribe footer"></label>
   </div>
+
+  <div class="card" style="margin-top: 18px; background: rgba(13, 19, 34, 0.4); border-color: var(--border-subtle);">
+    <label class="chk" style="font-weight: 500; display: flex; align-items: flex-start; gap: 10px; cursor: pointer;">
+      <input type="checkbox" name="update_sheet_sent" value="1" checked style="margin-top: 3px;">
+      <div>
+        <strong style="color: #ffffff;">📊 Mark 'Sent' &amp; sender email in Contact Sheet slot upon dispatch</strong> (Optional)
+        <p class="muted" style="margin: 4px 0 0 0; font-size: 12.5px; line-height: 1.5;">
+          Automatically marks "Sent" and records which sender account dispatched the email in the lead's sheet slot. You can export/download the updated sheet as CSV or Excel anytime.
+        </p>
+      </div>
+    </label>
+  </div>
 </div>
 
 <div class="wstep hidden" data-step="5">
@@ -115,9 +142,16 @@ function show(i){cur=i;
  document.getElementById('launchBtn').classList.toggle('hidden',i!==4);
  if(i===4) buildReview();
 }
+document.getElementById('selectAllAccounts').onclick=()=>{
+ document.querySelectorAll('input[name=account_ids]').forEach(c=>c.checked=true);
+};
+document.getElementById('deselectAllAccounts').onclick=()=>{
+ document.querySelectorAll('input[name=account_ids]').forEach(c=>c.checked=false);
+};
 document.getElementById('nextBtn').onclick=()=>{
  if(cur===0&&!document.querySelector('input[name=list_id]:checked'))return alert('Pick a list first.');
- if(cur===1&&!document.querySelector('input[name=account_id]:checked'))return alert('Pick an account first.');
+ const checkedAccs=[...document.querySelectorAll('input[name=account_ids]:checked')];
+ if(cur===1&&!checkedAccs.length&&!document.querySelector('input[name=account_id]:checked'))return alert('Pick at least one sender account.');
  if(cur===2&&!document.querySelector('input[name=draft_id]:checked'))return alert('Pick a draft first.');
  show(cur+1);
 };
@@ -125,19 +159,21 @@ document.getElementById('prevBtn').onclick=()=>show(cur-1);
 function val(n){const e=document.querySelector(`[name=${n}]`);return e?e.value:'';}
 function buildReview(){
  const list=document.querySelector('input[name=list_id]:checked');
- const acc=document.querySelector('input[name=account_id]:checked');
+ const checkedAccs=[...document.querySelectorAll('input[name=account_ids]:checked')];
+ const firstAccVal=checkedAccs.length ? checkedAccs[0].value : (document.querySelector('input[name=account_id]:checked')?document.querySelector('input[name=account_id]:checked').value:'');
+ document.getElementById('hidden_account_id').value=firstAccVal;
  const dr=document.querySelector('input[name=draft_id]:checked');
  const days=[...document.querySelectorAll('input[name=days]:checked')].map(e=>e.parentElement.textContent.trim()).join(', ');
  const L=list?list.parentElement.querySelector('strong').textContent:'—';
- const A=acc?acc.parentElement.querySelector('strong').textContent:'—';
+ const A=checkedAccs.length ? checkedAccs.map(c=>c.parentElement.querySelector('strong').textContent).join(', ') : '—';
  const D=dr?dr.parentElement.querySelector('strong').textContent:'—';
  const cap=+val('daily_cap'), gmin=+val('gap_min_sec'), gmax=+val('gap_max_sec');
  document.getElementById('review').innerHTML=
- `<p>You are about to send from <strong>${A}</strong> to list <strong>${L}</strong> using draft <strong>${D}</strong>.</p>
+ `<p>Sending from sender account(s): <strong style="color:#60a5fa;">${A}</strong> to list <strong>${L}</strong> using draft <strong>${D}</strong>.</p>
   <p>Days: <strong>${days}</strong> · Window: <strong>${val('window_start')}–${val('window_end')}</strong><br>
   Gap: <strong>${gmin}–${gmax}s</strong> between emails · Daily cap: <strong>${cap}</strong>${cap>150?' ⚠️ <b>above 150 — risky for deliverability</b>':''}</p>
-  <p class="muted">Every email gets a one-click unsubscribe link + your mailing address in the footer. Suppressed contacts are skipped automatically.</p>`;
- fetch(`/api/checklist?account_id=${acc?acc.value:''}`).then(r=>r.json()).then(j=>{
+  <p class="muted">Emails will be rotated across selected accounts without duplicates. Every email gets a one-click unsubscribe link + footer tokens.</p>`;
+ fetch(`/api/checklist?account_id=${firstAccVal}`).then(r=>r.json()).then(j=>{
   document.getElementById('checklist').innerHTML='<h3>Pre-launch deliverability checklist</h3><ul class="checklist">'+
    j.items.map(i=>`<li class="${i.status}">${i.status==='pass'?'✅':i.status==='fail'?'❌':'❔'} <strong>${i.label}</strong> — ${i.detail}</li>`).join('')+'</ul>';
  });

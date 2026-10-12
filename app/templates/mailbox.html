@@ -1,0 +1,234 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row-between" style="margin-bottom: 20px;">
+  <div>
+    <h1>Unified Outreach Mailbox</h1>
+    <p class="muted" style="margin: 4px 0 0 0; font-size: 13.5px;">Inspect bidirectional email exchanges: outbound dispatches, inbound recipient replies, and automated qualification.</p>
+  </div>
+</div>
+
+<div class="card" style="padding: 12px 18px; margin-bottom: 20px; display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;">
+  <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+    <span class="muted" style="font-size: 12px; font-weight: 700; text-transform: uppercase; margin-right: 4px;">Filter:</span>
+    <a href="/mailbox?cat=all{% if search_query %}&q={{ search_query }}{% endif %}" 
+       class="btn small {% if current_cat=='all' %}primary{% endif %}">
+      All ({{ cat_counts.get('all', 0) }})
+    </a>
+    <a href="/mailbox?cat=replied{% if search_query %}&q={{ search_query }}{% endif %}" 
+       class="btn small {% if current_cat=='replied' %}primary{% endif %}">
+      💬 Replied
+    </a>
+    <a href="/mailbox?cat=interested{% if search_query %}&q={{ search_query }}{% endif %}" 
+       class="btn small {% if current_cat=='interested' %}primary{% endif %}" style="color: #34d399;">
+      ⭐ Interested ({{ cat_counts.get('interested', 0) }})
+    </a>
+    <a href="/mailbox?cat=question{% if search_query %}&q={{ search_query }}{% endif %}" 
+       class="btn small {% if current_cat=='question' %}primary{% endif %}" style="color: #60a5fa;">
+      ❓ Questions ({{ cat_counts.get('question', 0) }})
+    </a>
+    <a href="/mailbox?cat=not%20interested{% if search_query %}&q={{ search_query }}{% endif %}" 
+       class="btn small {% if current_cat=='not interested' %}primary{% endif %}">
+      Not Interested ({{ cat_counts.get('not interested', 0) }})
+    </a>
+    <a href="/mailbox?cat=unsubscribe{% if search_query %}&q={{ search_query }}{% endif %}" 
+       class="btn small {% if current_cat=='unsubscribe' %}primary{% endif %}" style="color: #fde047;">
+      🛑 Opt-Out ({{ cat_counts.get('unsubscribe', 0) }})
+    </a>
+  </div>
+
+  <form method="get" action="/mailbox" class="inline-form" style="margin: 0;">
+    {% if current_cat and current_cat != 'all' %}<input type="hidden" name="cat" value="{{ current_cat }}">{% endif %}
+    <input type="text" name="q" value="{{ search_query }}" placeholder="Search email, name, subject..." style="padding: 6px 12px; font-size: 13px; width: 220px;">
+    {% if search_query %}<a href="/mailbox{% if current_cat %}?cat={{ current_cat }}{% endif %}" class="btn small">Clear</a>{% endif %}
+  </form>
+</div>
+
+{% if threads %}
+<div style="display: grid; grid-template-columns: 360px 1fr; gap: 20px; align-items: start; min-height: 640px;">
+  <!-- Thread List (Left Pane) -->
+  <div style="background: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); overflow: hidden; display: flex; flex-direction: column; max-height: 780px;">
+    <div style="padding: 12px 16px; background: rgba(13, 19, 34, 0.6); border-bottom: 1px solid var(--border-subtle); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-dim); display: flex; justify-content: space-between;">
+      <span>Threads ({{ threads|length }})</span>
+      <span>Latest Activity</span>
+    </div>
+    
+    <div style="overflow-y: auto; flex: 1;">
+      {% for t in threads %}
+        <a href="/mailbox?thread_id={{ t.send_id }}{% if current_cat %}&cat={{ current_cat }}{% endif %}{% if search_query %}&q={{ search_query }}{% endif %}"
+           style="display: block; padding: 14px 16px; border-bottom: 1px solid var(--border-subtle); text-decoration: none; color: inherit; transition: all 0.15s ease; position: relative; {% if active_thread and active_thread.send_id == t.send_id %}background: rgba(59, 130, 246, 0.12); border-left: 3px solid var(--accent-primary);{% endif %}">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+            <strong style="color: #ffffff; font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px;">
+              {{ t.contact_first_name }} {{ t.contact_last_name }} {% if not t.contact_first_name %}{{ t.contact_email.split('@')[0] }}{% endif %}
+            </strong>
+            <span class="muted" style="font-size: 11px; font-family: 'JetBrains Mono', monospace;">
+              {{ (t.latest_time or '')[:10] }}
+            </span>
+          </div>
+
+          <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+            {{ t.contact_email }} {% if t.contact_company %}· {{ t.contact_company }}{% endif %}
+          </div>
+
+          <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+            <span class="pill {% if t.category=='Interested' %}active{% elif t.category=='Bounce' %}failed{% elif t.category=='Unsubscribe' %}paused{% else %}cat{% endif %}" style="font-size: 10.5px; padding: 2px 7px;">
+              {{ t.category }}
+            </span>
+            <span class="muted" style="font-size: 11px; background: rgba(255,255,255,0.04); padding: 1px 6px; border-radius: 4px;">
+              {{ t.campaign_name[:18] }}
+            </span>
+            {% if t.replies %}
+              <span style="font-size: 11px; color: #34d399; font-weight: 600; margin-left: auto;">
+                💬 {{ t.replies|length }} reply
+              </span>
+            {% endif %}
+          </div>
+        </a>
+      {% endfor %}
+    </div>
+  </div>
+
+  <!-- Conversation Reader (Right Pane) -->
+  {% if active_thread %}
+  <div style="display: flex; flex-direction: column; gap: 16px;">
+    <!-- Active Header Bar -->
+    <div class="card" style="margin: 0; padding: 20px;">
+      <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 12px;">
+        <div style="display: flex; gap: 14px; align-items: center;">
+          <div style="width: 44px; height: 44px; border-radius: 50%; background: linear-gradient(135deg, #3b82f6, #8b5cf6); color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 18px; box-shadow: 0 0 16px rgba(59, 130, 246, 0.3);">
+            {{ (active_thread.contact_first_name[:1] if active_thread.contact_first_name else active_thread.contact_email[:1])|upper }}
+          </div>
+          <div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <h2 style="margin: 0; font-size: 18px;">
+                {{ active_thread.contact_first_name }} {{ active_thread.contact_last_name }}
+                {% if not active_thread.contact_first_name %}{{ active_thread.contact_email }}{% endif %}
+              </h2>
+              <span class="pill {% if active_thread.category=='Interested' %}active{% elif active_thread.category=='Bounce' %}failed{% elif active_thread.category=='Unsubscribe' %}paused{% else %}cat{% endif %}">
+                {{ active_thread.category }}
+              </span>
+            </div>
+            <div class="muted" style="font-size: 12.5px; margin-top: 2px;">
+              <span style="color: #ffffff;">{{ active_thread.contact_email }}</span>
+              {% if active_thread.contact_company %} · <span>{{ active_thread.contact_company }}</span>{% endif %}
+              · Campaign: <a href="/campaigns/{{ active_thread.campaign_id }}">{{ active_thread.campaign_name }}</a>
+            </div>
+          </div>
+        </div>
+
+        <!-- Quick actions -->
+        <div style="display: flex; gap: 8px; align-items: center;">
+          <form method="post" action="/mailbox/{{ active_thread.send_id }}/category" style="display: inline-flex; gap: 6px; align-items: center;">
+            <select name="category" style="padding: 6px 10px; font-size: 12px; margin: 0; width: auto; background: var(--bg-subtle);">
+              <option value="Interested" {% if active_thread.category=='Interested' %}selected{% endif %}>⭐ Interested</option>
+              <option value="Question" {% if active_thread.category=='Question' %}selected{% endif %}>❓ Question</option>
+              <option value="Not Interested" {% if active_thread.category=='Not Interested' %}selected{% endif %}>Not Interested</option>
+              <option value="Out of Office" {% if active_thread.category=='Out of Office' %}selected{% endif %}>Out of Office</option>
+              <option value="Unsubscribe" {% if active_thread.category=='Unsubscribe' %}selected{% endif %}>🛑 Unsubscribe</option>
+              <option value="Bounce" {% if active_thread.category=='Bounce' %}selected{% endif %}>Bounce</option>
+              <option value="Other" {% if active_thread.category=='Other' %}selected{% endif %}>Other</option>
+            </select>
+            <button class="btn small">Update</button>
+          </form>
+
+          <form method="post" action="/suppression/add" style="display: inline;">
+            <input type="hidden" name="email" value="{{ active_thread.contact_email }}">
+            <input type="hidden" name="reason" value="Manually blacklisted from mailbox">
+            <button class="btn danger small" title="Add to global suppression blacklist">Blacklist</button>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <!-- Message 1: Outbound Dispatch -->
+    <div class="card" style="margin: 0; border-left: 3px solid #3b82f6;">
+      <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-subtle); padding-bottom: 12px; margin-bottom: 14px;">
+        <div>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span class="pill" style="background: rgba(59, 130, 246, 0.15); color: #60a5fa; border-color: rgba(59, 130, 246, 0.3);">
+              📤 Outbound Dispatch
+            </span>
+            <strong style="color: #ffffff; font-size: 14px;">{{ outbound_subject or 'Outreach Email' }}</strong>
+          </div>
+          <div class="muted" style="font-size: 12px; margin-top: 4px;">
+            From: <strong style="color: #ffffff;">{{ active_thread.account_label }}</strong> ({{ active_thread.account_email }})
+            ➔ To: <strong style="color: #ffffff;">{{ active_thread.contact_email }}</strong>
+          </div>
+        </div>
+        <div style="text-align: right;">
+          <div class="muted" style="font-size: 11.5px; font-family: 'JetBrains Mono', monospace;">
+            {{ (active_thread.sent_at or '')[:19].replace('T', ' ') }}
+          </div>
+          <span class="pill active" style="font-size: 10px; margin-top: 4px;">
+            Delivered (250 OK)
+          </span>
+        </div>
+      </div>
+
+      <div style="font-size: 13.5px; line-height: 1.6; color: var(--text-main); background: rgba(7, 10, 18, 0.4); padding: 16px; border-radius: var(--radius-md); border: 1px solid var(--border-subtle);">
+        {% if outbound_html %}
+          {{ outbound_html|safe }}
+        {% else %}
+          <em class="muted">Template body rendering not recorded for this historical send.</em>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- Message 2+: Inbound Replies -->
+    {% for rep in active_thread.replies %}
+      <div class="card" style="margin: 0; border-left: 3px solid #10b981;">
+        <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-subtle); padding-bottom: 12px; margin-bottom: 14px;">
+          <div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span class="pill active">
+                📥 Inbound Recipient Reply
+              </span>
+              <strong style="color: #ffffff; font-size: 14px;">{{ rep.subject or 'Re: Outreach' }}</strong>
+            </div>
+            <div class="muted" style="font-size: 12px; margin-top: 4px;">
+              From: <strong style="color: #ffffff;">{{ active_thread.contact_email }}</strong>
+              ➔ Received in: <strong style="color: #ffffff;">{{ active_thread.account_label }}</strong> Inbox
+            </div>
+          </div>
+          <div style="text-align: right;">
+            <div class="muted" style="font-size: 11.5px; font-family: 'JetBrains Mono', monospace;">
+              {{ (rep.received_at or '')[:19].replace('T', ' ') }}
+            </div>
+            <span class="pill cat" style="font-size: 10px; margin-top: 4px;">
+              Classified: {{ rep.category }}
+            </span>
+          </div>
+        </div>
+
+        <div style="font-size: 14px; line-height: 1.7; color: #ffffff; background: rgba(16, 185, 129, 0.05); padding: 18px; border-radius: var(--radius-md); border: 1px solid rgba(16, 185, 129, 0.15); white-space: pre-wrap; font-family: inherit;">{{ rep.body }}</div>
+      </div>
+    {% else %}
+      <!-- Awaiting reply status card -->
+      <div class="card" style="margin: 0; text-align: center; padding: 32px 20px; background: rgba(13, 19, 34, 0.4); border-style: dashed;">
+        <div style="font-size: 24px; margin-bottom: 6px;">⏳</div>
+        <strong style="color: #ffffff;">Awaiting Recipient Response</strong>
+        <p class="muted" style="font-size: 13px; margin: 4px 0 0 0;">
+          The email was successfully delivered to <strong>{{ active_thread.contact_email }}</strong>. The background IMAP watcher checks for replies every 5 minutes and will display replies here automatically once detected.
+        </p>
+      </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="card" style="text-align: center; padding: 60px 20px;">
+    <p class="muted">Select a conversation thread from the left to read.</p>
+  </div>
+  {% endif %}
+</div>
+{% else %}
+<div class="card" style="text-align: center; padding: 60px 24px;">
+  <div style="font-size: 36px; margin-bottom: 12px;">📬</div>
+  <h2 style="justify-content: center; margin: 0 0 8px 0;">Your Unified Mailbox is Waiting</h2>
+  <p class="muted" style="font-size: 14px; max-width: 540px; margin: 0 auto 24px auto;">
+    Once you launch outreach campaigns, all outbound sent emails and every incoming prospect reply will be tracked here in full conversation threads just like a professional sales CRM mailbox.
+  </p>
+  <div style="display: inline-flex; gap: 10px;">
+    <a href="/campaigns/new" class="btn primary">+ Launch a Campaign</a>
+    <a href="/accounts" class="btn">Check Email Accounts</a>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
