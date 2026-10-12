@@ -358,7 +358,7 @@ async def campaign_create(request: Request):
                timezone, gap_min_sec, gap_max_sec, daily_cap, start_date, status,
                mailing_address, open_tracking, click_tracking,
                schedule_mode, send_slots, hourly_cap, created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?)""",
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (g("name"), int(g("list_id")), int(g("account_id")), int(g("draft_id")),
              dv["v"], int(g("draft_b_id")) if g("draft_b_id") else None, dv_b,
              int(g("ab_split") or 50), days, g("window_start", "09:00"),

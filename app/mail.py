@@ -42,9 +42,10 @@ def validate_email(raw: str):
 
 VAR_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}")
 
-# Single-brace spintax {a|b|c}, supporting nesting. The negative lookarounds
-# keep {{double-brace}} template variables untouched.
-SPINTAX_RE = re.compile(r"(?<!\{)\{([^{}]*)\}(?!\})")
+# Single-brace spintax {a|b|c}, supporting nesting. The pattern requires a
+# pipe and no inner braces, so it always matches the INNERMOST group first and
+# never touches {{double-brace}} template variables (no pipe) or {CSS} blocks.
+SPINTAX_RE = re.compile(r"\{([^{}]*\|[^{}]*)\}")
 
 
 def process_spintax(text: str, rng=None) -> str:

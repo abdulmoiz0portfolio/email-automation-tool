@@ -232,7 +232,9 @@ def send_one(campaign, cc):
     account = _account_dict(account)
     contact = {k: cc[k] for k in
                ("email", "first_name", "last_name", "company",
-                "custom_1", "custom_2", "custom_3", "contact_id")}
+                "custom_1", "custom_2", "custom_3", "custom_fields", "contact_id")}
+    # sqlite returns None for missing custom_fields on old rows; normalize
+    contact["custom_fields"] = contact.get("custom_fields") or "{}"
 
     # suppression / validity checks at send time (never email suppressed)
     sup = conn.execute("SELECT 1 FROM suppression WHERE email=?",
