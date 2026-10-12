@@ -13,14 +13,14 @@
 <div class="wstep" data-step="1">
   <h2>Pick a contact list</h2>
   {% for l in lists %}
-  <label class="radio-card"><input type="radio" name="list_id" value="{{ l.id }}" required>
-    <strong>{{ l.name }}</strong> <span class="muted">({{ l.count }} contacts, uploaded {{ l.created_at[:10] }})</span></label>
+  <label class="radio-card"><input type="radio" name="list_id" value="{{ l.id }}" data-gsheet="{{ 1 if l.has_gsheet else 0 }}" required>
+    <strong>{{ l.name }}</strong> <span class="muted">({{ l.count }} contacts, uploaded {{ l.created_at[:10] }})</span>{% if l.has_gsheet %} <span class="pill">📊 sheet-linked</span>{% endif %}</label>
   {% else %}<p class="muted">No lists yet — <a href="/contacts">upload one first</a>.</p>{% endfor %}
 </div>
 
 <div class="wstep hidden" data-step="2">
   <div class="row-between" style="align-items: center; margin-bottom: 8px;">
-    <h2 style="margin: 0;">Pick sending account(s)</h2>
+    <h2 style="margin: 0;">Pick sending account(s) <span class="tip" title="Tick one or more. Contacts are rotated across the selected accounts, each respecting its own daily/hourly caps and warm-up ramp. No contact ever gets the same email twice.">?</span></h2>
     <div style="display: flex; gap: 8px;">
       <button type="button" class="btn small" id="selectAllAccounts">Select All</button>
       <button type="button" class="btn small" id="deselectAllAccounts">Clear</button>
@@ -32,7 +32,7 @@
   <input type="hidden" name="account_id" id="hidden_account_id" value="">
   {% for a in accounts %}
   <label class="radio-card" style="display: flex; align-items: center; gap: 12px;">
-    <input type="checkbox" name="account_ids" value="{{ a.id }}" class="account-chk" {% if loop.first %}checked{% endif %}>
+    <input type="checkbox" name="account_ids" value="{{ a.id }}" class="acct-chk account-chk" {% if loop.first %}checked{% endif %}>
     <div style="flex: 1; display: flex; align-items: center; gap: 10px;">
       <strong style="color: #ffffff;">{{ a.label }}</strong>
       <span class="muted" style="font-family: 'JetBrains Mono', monospace; font-size: 12.5px;">{{ a.email }}</span>
@@ -41,6 +41,7 @@
     </div>
   </label>
   {% else %}<p class="muted">No accounts — <a href="/accounts">connect one first</a>.</p>{% endfor %}
+  <p class="muted" id="acct-hint">1 account selected.</p>
 </div>
 
 <div class="wstep hidden" data-step="3">
@@ -97,6 +98,10 @@
     <label><input type="checkbox" name="open_tracking" value="1"> Enable Open Tracking <span class="tip" title="Adds an invisible 1×1 pixel to each email. Opens are recorded per send. Slightly increases spam-filter scrutiny — keep OFF for cold outreach if deliverability is critical.">?</span></label>
     <label><input type="checkbox" name="click_tracking" value="1"> Enable Click Tracking <span class="tip" title="Rewrites links through a redirect so clicks are recorded per send.">?</span></label>
   </div>
+  <div id="sheetwb" class="hidden">
+    <label><input type="checkbox" name="mark_sent_in_sheet" value="1" id="sheetwb_chk"> Mark sent account in Google Sheet <span class="tip" title="After each send, the sending account's email is written into a 'sent_via' column in the linked Google Sheet, matched by contact email. Writes are batched (one API call per 50 sends).">?</span></label>
+    {% if not sa_configured %}<p class="err">⚠️ Sheet write-back needs a <a href="/settings">Google service account in Settings</a> first — the toggle is disabled until then.</p>{% endif %}
+  </div>
   <div class="grid2">
     <label>Start date <input type="date" name="start_date" value="{{ today }}" required></label>
     <label>Physical mailing address <input type="text" name="mailing_address" value="{{ physical_address }}" placeholder="Required for the unsubscribe footer"></label>
@@ -151,7 +156,7 @@ document.getElementById('deselectAllAccounts').onclick=()=>{
 document.getElementById('nextBtn').onclick=()=>{
  if(cur===0&&!document.querySelector('input[name=list_id]:checked'))return alert('Pick a list first.');
  const checkedAccs=[...document.querySelectorAll('input[name=account_ids]:checked')];
- if(cur===1&&!checkedAccs.length&&!document.querySelector('input[name=account_id]:checked'))return alert('Pick at least one sender account.');
+ if(cur===1&&!checkedAccs.length&&!document.querySelector('input[name=account_id]:checked'))return alert('Pick at least one sending account.');
  if(cur===2&&!document.querySelector('input[name=draft_id]:checked'))return alert('Pick a draft first.');
  show(cur+1);
 };
@@ -159,13 +164,14 @@ document.getElementById('prevBtn').onclick=()=>show(cur-1);
 function val(n){const e=document.querySelector(`[name=${n}]`);return e?e.value:'';}
 function buildReview(){
  const list=document.querySelector('input[name=list_id]:checked');
- const checkedAccs=[...document.querySelectorAll('input[name=account_ids]:checked')];
- const firstAccVal=checkedAccs.length ? checkedAccs[0].value : (document.querySelector('input[name=account_id]:checked')?document.querySelector('input[name=account_id]:checked').value:'');
- document.getElementById('hidden_account_id').value=firstAccVal;
+ const accs=[...document.querySelectorAll('input[name=account_ids]:checked')];
+ const firstAccVal=accs.length ? accs[0].value : (document.querySelector('input[name=account_id]:checked')?document.querySelector('input[name=account_id]:checked').value:'');
+ const hiddenAcc=document.getElementById('hidden_account_id');
+ if(hiddenAcc)hiddenAcc.value=firstAccVal;
  const dr=document.querySelector('input[name=draft_id]:checked');
  const days=[...document.querySelectorAll('input[name=days]:checked')].map(e=>e.parentElement.textContent.trim()).join(', ');
  const L=list?list.parentElement.querySelector('strong').textContent:'—';
- const A=checkedAccs.length ? checkedAccs.map(c=>c.parentElement.querySelector('strong').textContent).join(', ') : '—';
+ const A=accs.length?accs.map(a=>a.parentElement.querySelector('strong').textContent).join(', '):'—';
  const D=dr?dr.parentElement.querySelector('strong').textContent:'—';
  const cap=+val('daily_cap'), gmin=+val('gap_min_sec'), gmax=+val('gap_max_sec');
  document.getElementById('review').innerHTML=
@@ -186,7 +192,25 @@ function buildReview(){
 document.getElementById('wizard').addEventListener('submit',e=>{
  if(!document.getElementById('launch_ack').checked){e.preventDefault();alert('Please confirm the launch.');}
 });
-// --- follow-up steps: dynamic rows (fup_draft_N / fup_delay_N) ---
+// --- account multi-select hint ---
+const SA_OK = {{ 'true' if sa_configured else 'false' }};
+function updAcctHint(){
+ const n=document.querySelectorAll('input[name=account_ids]:checked').length;
+ document.getElementById('acct-hint').textContent = n+' account'+(n===1?'':'s')+' selected — contacts split across them, no duplicates.';
+}
+document.querySelectorAll('input[name=account_ids]').forEach(c=>c.onchange=updAcctHint);
+updAcctHint();
+// --- sheet write-back toggle: only for sheet-linked lists ---
+function updSheetWb(){
+ const sel=document.querySelector('input[name=list_id]:checked');
+ const show = sel && sel.dataset.gsheet==='1';
+ document.getElementById('sheetwb').classList.toggle('hidden',!show);
+ const chk=document.getElementById('sheetwb_chk');
+ if(!show) chk.checked=false;
+ chk.disabled = !SA_OK;
+}
+document.querySelectorAll('input[name=list_id]').forEach(r=>r.onchange=updSheetWb);
+updSheetWb();
 const draftOpts = `{% for d in drafts %}<option value="{{ d.id }}">{{ d.name }} (v{{ d.version }})</option>{% endfor %}`;
 let fupN = 0;
 document.getElementById('fupadd').onclick = ()=>{

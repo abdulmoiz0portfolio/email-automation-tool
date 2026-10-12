@@ -109,8 +109,8 @@ def in_window(campaign, now=None):
 def sent_today_count(account_id, day):
     conn = db.get_db()
     row = conn.execute(
-        "SELECT COUNT(*) c FROM sends s JOIN campaigns c ON c.id=s.campaign_id "
-        "WHERE c.account_id=? AND s.status='sent' AND date(s.sent_at)=date(?)",
+        "SELECT COUNT(*) c FROM sends s "
+        "WHERE s.account_id=? AND s.status='sent' AND date(s.sent_at)=date(?)",
         (account_id, day)).fetchone()
     return row["c"]
 
@@ -118,16 +118,16 @@ def sent_today_count(account_id, day):
 def total_sent_account(account_id):
     conn = db.get_db()
     row = conn.execute(
-        "SELECT COUNT(*) c FROM sends s JOIN campaigns c ON c.id=s.campaign_id "
-        "WHERE c.account_id=? AND s.status='sent'", (account_id,)).fetchone()
+        "SELECT COUNT(*) c FROM sends s "
+        "WHERE s.account_id=? AND s.status='sent'", (account_id,)).fetchone()
     return row["c"]
 
 
 def first_send_at(account_id):
     conn = db.get_db()
     row = conn.execute(
-        "SELECT MIN(s.sent_at) m FROM sends s JOIN campaigns c ON c.id=s.campaign_id "
-        "WHERE c.account_id=? AND s.status='sent'", (account_id,)).fetchone()
+        "SELECT MIN(s.sent_at) m FROM sends s "
+        "WHERE s.account_id=? AND s.status='sent'", (account_id,)).fetchone()
     return parse_iso(row["m"]) if row and row["m"] else None
 
 
@@ -143,6 +143,48 @@ def effective_daily_cap(account, campaign, now):
     if age_days < 30 or total < 50:
         return min(cap, 20 + 10 * max(0, warm_days)), True
     return cap, False
+
+
+# ---------- multi-account sending ----------
+
+def campaign_accounts(campaign_id):
+    """All sending accounts attached to a campaign (junction table)."""
+    conn = db.get_db()
+    rows = conn.execute(
+        """SELECT a.* FROM campaign_accounts ca
+           JOIN accounts a ON a.id=ca.account_id
+           WHERE ca.campaign_id=? ORDER BY a.id""", (campaign_id,)).fetchall()
+    if not rows:
+        # legacy fallback: single account_id column
+        row = conn.execute(
+            """SELECT a.* FROM campaigns c JOIN accounts a ON a.id=c.account_id
+               WHERE c.id=?""", (campaign_id,)).fetchone()
+        rows = [row] if row else []
+    return [dict(r) for r in rows]
+
+
+def choose_account(campaign, now):
+    """Pick the sending account for the next email: among the campaign's
+    connected accounts with remaining capacity, take the one with the most
+    remaining daily capacity (tie-break: least sent this hour, then lowest id).
+    Returns the account dict or None."""
+    best, best_key = None, None
+    for account in campaign_accounts(campaign["id"]):
+        if account.get("status") not in ("connected", "unknown"):
+            continue
+        cap, _warming = effective_daily_cap(account, campaign, now)
+        sent_today = sent_today_count(account["id"], iso(now))
+        remaining = cap - sent_today
+        if remaining <= 0:
+            continue
+        ahcap = int(account.get("hourly_cap") or 0)
+        sent_hour = sent_last_hour_account(account["id"]) if ahcap else 0
+        if ahcap and sent_hour >= ahcap:
+            continue
+        key = (remaining, -sent_hour, -account["id"])
+        if best_key is None or key > best_key:
+            best, best_key = account, key
+    return best
 
 
 def auto_pause(campaign_id, reason):
@@ -188,8 +230,8 @@ def sent_last_hour_count(campaign_id):
 def sent_last_hour_account(account_id):
     conn = db.get_db()
     row = conn.execute(
-        "SELECT COUNT(*) c FROM sends s JOIN campaigns c ON c.id=s.campaign_id "
-        "WHERE c.account_id=? AND s.status='sent' AND s.sent_at >= datetime('now','-1 hour')",
+        "SELECT COUNT(*) c FROM sends s "
+        "WHERE s.account_id=? AND s.status='sent' AND s.sent_at >= datetime('now','-1 hour')",
         (account_id,)).fetchone()
     return row["c"]
 
@@ -309,12 +351,24 @@ def send_one(campaign, cc, account=None):
             (campaign["id"], step + 1)).fetchone()
 
         def _ok(c):
-            c.execute(
-                """INSERT INTO sends(campaign_id, contact_id, draft_version, variant,
-                   message_id, unsub_token, sent_at, status, smtp_status, account_id)
-                   VALUES(?,?,?,?,?,?,?, 'sent', ?, ?)""",
-                (campaign["id"], cc["contact_id"], draft_ver, variant,
-                 message_id, token, now_s, resp[:300], account["id"]))
+            try:
+                cur = c.execute(
+                    """INSERT INTO sends(campaign_id, contact_id, account_id, step,
+                       draft_version, variant, message_id, unsub_token, sent_at,
+                       status, smtp_status)
+                       VALUES(?,?,?,?,?,?,?,?,?, 'sent', ?)""",
+                    (campaign["id"], cc["contact_id"], account["id"], step,
+                     draft_ver, variant, message_id, token, now_s, resp[:300]))
+                send_id = cur.lastrowid
+            except Exception as e:
+                # backstop: the partial unique index (campaign,contact,step)
+                # rejected a duplicate 'sent' row — another worker already sent it
+                if "idx_sends_nodup" in str(e) or "UNIQUE constraint failed: sends" in str(e):
+                    c.execute(
+                        "UPDATE campaign_contacts SET status='sent', sent_at=? WHERE id=?",
+                        (now_s, cc["id"]))
+                    return "duplicate-suppressed"
+                raise
             if next_step:
                 due = utcnow() + timedelta(days=int(next_step["delay_days"]))
                 c.execute(
@@ -335,7 +389,15 @@ def send_one(campaign, cc, account=None):
             gap = random.randint(int(campaign["gap_min_sec"]), int(campaign["gap_max_sec"]))
             c.execute("UPDATE campaigns SET next_due_at=? WHERE id=?",
                       (iso(utcnow() + timedelta(seconds=gap)), campaign["id"]))
-        db.tx(_ok)
+            return send_id
+        send_id = db.tx(_ok)
+        # opt-in: queue "sent via" write-back to the linked Google Sheet
+        try:
+            from . import sheetwrite
+            sheetwrite.queue(campaign["id"], contact["email"], account["email"],
+                             send_id if isinstance(send_id, int) else None)
+        except Exception:
+            pass
         db.tx(lambda c: c.execute("UPDATE accounts SET auth_fail_count=0 WHERE id=?",
                                   (account["id"],)))
         check_bounce_rate(campaign["id"])
@@ -343,11 +405,12 @@ def send_one(campaign, cc, account=None):
     else:
         def _fail(c):
             c.execute(
-                """INSERT INTO sends(campaign_id, contact_id, draft_version, variant,
-                   message_id, unsub_token, sent_at, status, smtp_status, account_id)
-                   VALUES(?,?,?,?,?,?,?, 'failed', ?, ?)""",
-                (campaign["id"], cc["contact_id"], draft_ver, variant,
-                 message_id, token, now_s, resp[:300], account["id"]))
+                """INSERT INTO sends(campaign_id, contact_id, account_id, step,
+                   draft_version, variant, message_id, unsub_token, sent_at,
+                   status, smtp_status)
+                   VALUES(?,?,?,?,?,?,?,?,?, 'failed', ?)""",
+                (campaign["id"], cc["contact_id"], account["id"], step,
+                 draft_ver, variant, message_id, token, now_s, resp[:300]))
             c.execute("UPDATE campaign_contacts SET status='queued' WHERE id=?", (cc["id"],))
         db.tx(_fail)
         if "AUTH FAILED" in resp:
@@ -417,14 +480,17 @@ def _process_one_campaign(camp, now):
             return
 
         conn = db.get_db()
-        account = _pick_campaign_account(camp, now)
+        # multi-account: pick the sending account for THIS email (round-robin
+        # weighted by remaining capacity), respecting caps + warm-up.
+        account = choose_account(camp, now)
         if not account:
             return
-
-        # hourly caps: campaign-level
+        # campaign-level hourly cap still applies
         hcap = int(camp.get("hourly_cap") or 0)
         if hcap and sent_last_hour_count(camp["id"]) >= hcap:
             return
+        camp = dict(camp)
+        camp["account_id"] = account["id"]  # the chosen sender for this email
 
         cc = claim_next_contact(camp["id"], now)
         if not cc:
@@ -440,31 +506,28 @@ def _process_one_campaign(camp, now):
 
 
 def process_campaigns(now=None):
-    """Group active campaigns by account and process each account's campaigns
-    in the shared thread pool — a slow SMTP/IMAP account never blocks others."""
+    """Process each active campaign in the shared thread pool — a slow
+    SMTP/IMAP account never blocks other campaigns. Campaigns with multiple
+    sending accounts distribute contacts across them (see choose_account).
+    Per-campaign locks keep gap pacing intact."""
     now = now or utcnow()
     conn = db.get_db()
-    campaigns = conn.execute(
-        "SELECT * FROM campaigns WHERE status IN ('active','scheduled')").fetchall()
-    by_account = {}
-    for camp_row in campaigns:
-        camp = dict(camp_row)
-        acc_ids = [int(x) for x in (camp.get("account_ids") or "").split(",") if x.strip()] or [camp["account_id"]]
-        for aid in acc_ids:
-            by_account.setdefault(aid, []).append(camp)
+    campaigns = [dict(c) for c in conn.execute(
+        "SELECT * FROM campaigns WHERE status IN ('active','scheduled')").fetchall()]
     ex = _executor()
-    futures = []
-    for camps in by_account.values():
-        def _run(camps=camps, now=now):
-            for camp in camps:
-                try:
-                    _process_one_campaign(camp, now)
-                except Exception:
-                    pass
-        futures.append(ex.submit(_run))
+
+    def _run(camp):
+        try:
+            _process_one_campaign(camp, now)
+        except Exception:
+            pass
+
+    futures = [ex.submit(_run, camp) for camp in campaigns]
     for f in futures:
         try:
             f.result()
+        except Exception:
+            pass
         except Exception:
             pass
 
@@ -611,6 +674,11 @@ def worker_loop(poll_interval=20):
     while not STOP.is_set():
         try:
             process_campaigns()
+        except Exception:
+            pass
+        try:
+            from . import sheetwrite
+            sheetwrite.flush()
         except Exception:
             pass
         try:

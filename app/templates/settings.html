@@ -18,4 +18,21 @@
 {% if gsheet_key_set %}<span class="muted">Key saved ✓ — leave blank to keep it.</span>{% endif %}</label>
 <button class="btn primary">Save settings</button>
 </form>
+
+<h2>Google service account <span class="tip" title="Needed ONLY for writing back to Google Sheets (the 'sent via' column). API keys are read-only and cannot write. The JSON key is stored encrypted on this server — only the client email is ever displayed.">?</span></h2>
+<div class="card">
+{% if sa_email %}
+<p><span class="pill connected">connected</span> <strong>{{ sa_email }}</strong></p>
+<p class="muted">⚠️ Important: share each Google Sheet with <strong>{{ sa_email }}</strong> as <strong>Editor</strong>, otherwise write-back will fail with a permission error.</p>
+<form method="post" action="/settings/service-account/remove" onsubmit="return confirm('Remove the service account? Sheet write-back will stop working.');">
+<button class="btn danger small">Remove service account</button></form>
+{% else %}
+<p class="muted">No service account yet. Sheet write-back is disabled until you upload one.</p>
+<p class="muted">How to get one: Google Cloud Console → create/select a project → enable <strong>Sheets API</strong> → IAM &amp; Admin → Service Accounts → create → <strong>Keys → Add key → JSON</strong> → download the file.</p>
+{% endif %}
+<form method="post" action="/settings/service-account" enctype="multipart/form-data" class="form">
+<label>Service-account JSON key <input type="file" name="sa_file" accept=".json,application/json" required></label>
+<button class="btn primary">{% if sa_email %}Replace key{% else %}Upload key{% endif %}</button>
+</form>
+</div>
 {% endblock %}

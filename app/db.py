@@ -4,7 +4,7 @@ import os
 import sqlite3
 import threading
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+DATA_DIR = os.environ.get("DATA_DIR") or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 DB_PATH = os.path.join(DATA_DIR, "emailtool.db")
 
 _local = threading.local()
@@ -85,6 +85,12 @@ CREATE TABLE IF NOT EXISTS campaign_contacts(
     UNIQUE(campaign_id, contact_id)
 );
 CREATE INDEX IF NOT EXISTS idx_cc_campaign ON campaign_contacts(campaign_id, status);
+-- v2: campaigns can send from multiple accounts (junction; campaigns.account_id = primary/legacy)
+CREATE TABLE IF NOT EXISTS campaign_accounts(
+    campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    PRIMARY KEY (campaign_id, account_id)
+);
 CREATE TABLE IF NOT EXISTS sends(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
@@ -212,7 +218,12 @@ _MIGRATIONS = [
     ("contacts", "sent_by_account", "TEXT NOT NULL DEFAULT ''"),
     ("campaigns", "update_sheet_sent", "INTEGER NOT NULL DEFAULT 0"),
     ("campaigns", "account_ids", "TEXT NOT NULL DEFAULT ''"),
+    # v2: multi-account sending — which account actually sent each email
     ("sends", "account_id", "INTEGER"),
+    ("sends", "step", "INTEGER NOT NULL DEFAULT 1"),
+    ("sends", "sheet_marked", "INTEGER NOT NULL DEFAULT 0"),
+    # v2: opt-in "sent via" write-back to the linked Google Sheet
+    ("campaigns", "mark_sent_in_sheet", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 
@@ -221,6 +232,19 @@ def _migrate(conn):
         cols = [r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
         if column not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+    # v2: hard no-duplicate guarantee — a contact gets each campaign step at
+    # most once. Partial index (only 'sent') so failed sends can be retried.
+    # Created here (not in SCHEMA) because it references the migrated `step` col.
+    conn.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_sends_nodup
+                    ON sends(campaign_id, contact_id, step) WHERE status='sent'""")
+    # v2 data migration: backfill campaign_accounts from legacy single account_id
+    try:
+        conn.execute("""INSERT OR IGNORE INTO campaign_accounts(campaign_id, account_id)
+                        SELECT id, account_id FROM campaigns
+                        WHERE NOT EXISTS (SELECT 1 FROM campaign_accounts ca
+                                          WHERE ca.campaign_id=campaigns.id)""")
+    except Exception:
+        pass
 
 
 _db_lock = threading.RLock()

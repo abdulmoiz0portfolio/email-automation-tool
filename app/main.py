@@ -496,9 +496,14 @@ def campaign_new(request: Request):
            WHERE dv.version=(SELECT MAX(version) FROM draft_versions WHERE draft_id=d.id)
            ORDER BY d.id DESC""").fetchall()]
     s = {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM settings")}
+    from . import gsheets as gsheets_mod
+    sa_configured = gsheets_mod.service_account_info() is not None
+    for l in lists:
+        l["has_gsheet"] = bool(l.get("gsheet_id"))
     return templates.TemplateResponse(request, "campaign_new.html", base_ctx(
         request, "campaigns", lists=lists, accounts=accounts, drafts=drafts,
-        today=date.today().isoformat(), physical_address=s.get("physical_address", "")))
+        today=date.today().isoformat(), physical_address=s.get("physical_address", ""),
+        sa_configured=sa_configured))
 
 
 @app.post("/campaigns")
@@ -533,6 +538,37 @@ async def campaign_create(request: Request):
                 continue
         if not slots:
             schedule_mode = "continuous"  # no valid slots -> fall back
+    # --- sending accounts: multi-select (at least one) ---
+    account_ids = []
+    for raw in form.getlist("account_ids"):
+        try:
+            account_ids.append(int(raw))
+        except (ValueError, TypeError):
+            continue
+    if not account_ids:
+        # legacy single-account form field
+        try:
+            account_ids = [int(g("account_id"))]
+        except (ValueError, TypeError):
+            return redir("/campaigns/new", "Pick at least one sending account.", "err")
+    existing = {r["id"] for r in db.get_db().execute(
+        "SELECT id FROM accounts WHERE id IN (%s)" % ",".join("?" * len(account_ids)),
+        account_ids).fetchall()}
+    account_ids = [a for a in dict.fromkeys(account_ids) if a in existing]
+    if not account_ids:
+        return redir("/campaigns/new", "Pick at least one sending account.", "err")
+    # --- opt-in "sent via" sheet write-back: needs a sheet-linked list + service account ---
+    mark_sheet = 1 if g("mark_sent_in_sheet") else 0
+    if mark_sheet:
+        from . import gsheets
+        lst = db.get_db().execute("SELECT gsheet_id FROM contact_lists WHERE id=?",
+                                  (int(g("list_id")),)).fetchone()
+        if not lst or not lst["gsheet_id"]:
+            return redir("/campaigns/new",
+                         "Sheet write-back needs a Google-Sheet-linked contact list.", "err")
+        if not gsheets.service_account_info():
+            return redir("/campaigns/new",
+                         "Sheet write-back needs a Google service account in Settings first.", "err")
     try:
         hourly_cap = max(0, min(1000, int(g("hourly_cap") or 0)))
     except ValueError:
@@ -565,9 +601,10 @@ async def campaign_create(request: Request):
                draft_b_id, draft_b_version, ab_split, days_of_week, window_start, window_end,
                timezone, gap_min_sec, gap_max_sec, daily_cap, start_date, status,
                mailing_address, open_tracking, click_tracking,
-               schedule_mode, send_slots, hourly_cap, account_ids, update_sheet_sent, created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (g("name"), int(g("list_id")), primary_acc_id, int(g("draft_id")),
+               schedule_mode, send_slots, hourly_cap, mark_sent_in_sheet,
+               account_ids, update_sheet_sent, created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (g("name"), int(g("list_id")), account_ids[0], int(g("draft_id")),
              dv["v"], int(g("draft_b_id")) if g("draft_b_id") else None, dv_b,
              int(g("ab_split") or 50), days, g("window_start", "09:00"),
              g("window_end", "17:00"), s.get("timezone", "Asia/Karachi"),
@@ -575,10 +612,15 @@ async def campaign_create(request: Request):
              int(g("daily_cap") or 80), g("start_date"), "active",
              g("mailing_address", ""),
              1 if g("open_tracking") else 0, 1 if g("click_tracking") else 0,
-             schedule_mode, json.dumps(slots), hourly_cap,
+             schedule_mode, json.dumps(slots), hourly_cap, mark_sheet,
              acc_ids_str, update_sheet_sent,
              utcnow_s()))
         cid = cur.lastrowid
+        # multi-account sending set (account_ids[0] stays the primary/legacy one)
+        for aid in account_ids:
+            conn.execute(
+                "INSERT OR IGNORE INTO campaign_accounts(campaign_id, account_id) VALUES(?,?)",
+                (cid, aid))
         # follow-up sequence: step 1 = main draft (implicit), steps 2+ stored here
         for order, fu in enumerate(followups, start=2):
             conn.execute(
@@ -637,6 +679,14 @@ def campaign_detail(request: Request, cid: int):
         """SELECT cs.step_order, cs.delay_days, cs.draft_version, d.name draft_name
            FROM campaign_steps cs JOIN drafts d ON d.id=cs.draft_id
            WHERE cs.campaign_id=? ORDER BY cs.step_order""", (cid,)).fetchall()]
+    send_accounts = [dict(r) for r in conn.execute(
+        """SELECT a.id, a.label, a.email, a.status FROM campaign_accounts ca
+           JOIN accounts a ON a.id=ca.account_id WHERE ca.campaign_id=? ORDER BY a.id""",
+        (cid,)).fetchall()]
+    if not send_accounts and c.get("account_id"):
+        send_accounts = [dict(r) for r in conn.execute(
+            "SELECT id, label, email, status FROM accounts WHERE id=?",
+            (c["account_id"],)).fetchall()]
     # schedule summary for display
     sched = ""
     if c.get("schedule_mode") == "slots":
@@ -661,13 +711,17 @@ def campaign_detail(request: Request, cid: int):
             WHERE s.campaign_id=? {swhere}""", [cid] + sp).fetchone()["c"]
     spg = pager(stotal, page, per)
     sends = [dict(r) for r in conn.execute(
-        f"""SELECT s.sent_at, s.variant, s.status, s.smtp_status, c.email FROM sends s
-           JOIN contacts c ON c.id=s.contact_id WHERE s.campaign_id=? {swhere}
+        f"""SELECT s.sent_at, s.variant, s.status, s.smtp_status, c.email,
+               a.email AS sent_via
+           FROM sends s
+           JOIN contacts c ON c.id=s.contact_id
+           LEFT JOIN accounts a ON a.id=s.account_id
+           WHERE s.campaign_id=? {swhere}
            ORDER BY s.id DESC LIMIT ? OFFSET ?""",
         [cid] + sp + [spg["per"], spg["offset"]]).fetchall()]
     return templates.TemplateResponse(request, "campaign_detail.html", base_ctx(
         request, "campaigns", c=c, s=stats, ab=ab, replies=replies,
-        sends=sends, newer_version=newer, steps=steps,
+        sends=sends, newer_version=newer, steps=steps, send_accounts=send_accounts,
         spg=spg, sq=sq, sstatus=sstatus))
 
 
@@ -1018,6 +1072,10 @@ def _run_gsheet_sync(job_id: str, lid: int):
                 mapped = {f: (row.get(h) or "").strip() for h, f in col2field.items()}
                 extras = {}
                 for h in headers:
+                    # sent_via is write-back metadata owned by this tool — read-only
+                    # on sync: never import it as a custom field, never overwrite it.
+                    if (h or "").strip().lower() == "sent_via":
+                        continue
                     if h not in col2field and (row.get(h) or "").strip():
                         extras[_sanitize_custom_key(h)] = (row.get(h) or "").strip()
                 email = mapped.get("email", "").strip().lower()
@@ -1828,9 +1886,18 @@ def deliverability_test(request: Request, draft_id: int = Form(...),
 def settings_page(request: Request):
     from zoneinfo import available_timezones
     s = {r["key"]: r["value"] for r in db.get_db().execute("SELECT key, value FROM settings")}
+    sa_email = ""
+    try:
+        from . import gsheets as gsheets_mod
+        sa = gsheets_mod.service_account_info()
+        if sa:
+            sa_email = sa.get("client_email", "")
+    except Exception:
+        pass
     return templates.TemplateResponse(request, "settings.html", base_ctx(
         request, "settings", s=s,
         gsheet_key_set=bool(authmod.get_setting("google_sheets_api_key", "")),
+        sa_email=sa_email,
         timezones=sorted(available_timezones())))
 
 
@@ -1862,3 +1929,36 @@ def settings_save(request: Request, timezone: str = Form(...), base_url: str = F
     if key and not set(key) <= {"\u2022"}:
         authmod.set_setting("google_sheets_api_key", encrypt(key))
     return redir("/settings", "Settings saved.", "info")
+
+
+@app.post("/settings/service-account")
+async def settings_service_account(request: Request):
+    """Upload a Google service-account JSON key (needed for sheet write-back).
+    Stored encrypted; only client_email is ever shown."""
+    gate = sudo_or_redirect(request)
+    if gate:
+        return gate
+    form = await request.form()
+    up = form.get("sa_file")
+    if not up or not getattr(up, "filename", ""):
+        return redir("/settings", "No file chosen.", "err")
+    try:
+        raw = (await up.read()).decode("utf-8", "replace")
+        info = json.loads(raw)
+    except Exception:
+        return redir("/settings", "That is not a valid JSON file.", "err")
+    if not isinstance(info, dict) or "client_email" not in info or "private_key" not in info:
+        return redir("/settings",
+                     "Not a service-account key (needs client_email + private_key).", "err")
+    authmod.set_setting("google_service_account_json", encrypt(raw))
+    return redir("/settings",
+                 f"Service account saved ({info['client_email']}). Share your sheet with this email as Editor.", "info")
+
+
+@app.post("/settings/service-account/remove")
+def settings_service_account_remove(request: Request):
+    gate = sudo_or_redirect(request)
+    if gate:
+        return gate
+    db.tx(lambda c: c.execute("DELETE FROM settings WHERE key='google_service_account_json'"))
+    return redir("/settings", "Service account removed.", "info")
