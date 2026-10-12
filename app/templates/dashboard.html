@@ -21,7 +21,7 @@
 <h2>Daily usage per account <span class="tip" title="How many emails each account sent today vs its daily cap.">?</span></h2>
 {% for u in usage %}
 <div class="usage">
-  <div class="usage-label">{{ u.label }} ({{ u.email }}) — {{ u.sent }}/{{ u.cap }} today{% if u.warming %} · 🔥 warming up{% endif %}</div>
+  <div class="usage-label">{{ u.label }} ({{ u.email }}) — {{ u.sent }}/{{ u.cap }} today{% if u.warming %} · <span class="pill warming" title="Daily Send Volume Throttling Ramp: this account is new, so sends are capped low (20/day +10/day) to protect deliverability.">🔥 warming up</span>{% endif %}</div>
   <div class="bar"><div class="fill" style="width:{{ u.pct }}%"></div></div>
 </div>
 {% else %}

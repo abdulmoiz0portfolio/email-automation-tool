@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Send log</h1>
+<form method="get" action="/sends" class="inline-form">
+<input type="text" name="q" value="{{ q }}" placeholder="Search email or campaign…">
+<select name="status"><option value="">all statuses</option>
+{% for st in statuses %}<option value="{{ st }}" {% if status==st %}selected{% endif %}>{{ st }}</option>{% endfor %}</select>
+<button class="btn">Search</button>
+{% if q or status %}<a class="btn" href="/sends">Clear</a>{% endif %}
+</form>
+<table><tr><th>When</th><th>Campaign</th><th>To</th><th>Variant</th><th>Status</th><th>Opened</th><th>Clicks</th><th>SMTP</th></tr>
+{% for s in rows %}
+<tr><td class="muted">{{ (s.sent_at or '')[:19].replace('T',' ') }}</td>
+<td>{{ s.campaign_name }}</td><td>{{ s.email }}</td><td>{{ s.variant }}</td>
+<td><span class="pill {{ s.status }}">{{ s.status }}</span></td>
+<td>{% if s.opened_at %}👁 {{ s.opened_at[:16].replace('T',' ') }}{% else %}<span class="muted">—</span>{% endif %}</td>
+<td>{{ s.clicks }}</td><td class="muted">{{ (s.smtp_status or '')[:40] }}</td></tr>
+{% else %}<tr><td colspan="8" class="muted">No sends yet.</td></tr>{% endfor %}
+</table>
+{% set base = '/sends' %}{% include "_pager.html" %}
+{% endblock %}

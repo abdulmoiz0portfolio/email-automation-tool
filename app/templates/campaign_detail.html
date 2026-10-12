@@ -35,6 +35,15 @@
 {% if ab %}<h2>A/B split</h2><table><tr><th>Variant</th><th>Sent</th><th>Replies</th></tr>
 {% for r in ab %}<tr><td>{{ r.variant }} ({{ r.draft_name }} v{{ r.draft_version }})</td><td>{{ r.sent }}</td><td>{{ r.replies }}</td></tr>{% endfor %}</table>{% endif %}
 
+{% if steps %}
+<h2>Follow-up sequence <span class="tip" title="Follow-ups are sent only if the contact has NOT replied or unsubscribed. Each one threads into the same email conversation.">?</span></h2>
+<table><tr><th>Step</th><th>Draft</th><th>Sends</th></tr>
+<tr><td>1 — initial</td><td>{{ c.draft_name }} (v{{ c.draft_version }})</td><td class="muted">immediately</td></tr>
+{% for st in steps %}<tr><td>{{ st.step_order }} — follow-up</td><td>{{ st.draft_name }} (v{{ st.draft_version }})</td>
+<td class="muted">{{ st.delay_days }} day{{ 's' if st.delay_days != 1 }} after previous, if no reply</td></tr>{% endfor %}
+</table>
+{% endif %}
+
 <h2>Sends per day</h2>
 <canvas id="chart" width="800" height="220"></canvas>
 
@@ -43,8 +52,9 @@
 <tr><td>Account</td><td>{{ c.account_label }} ({{ c.account_email }})</td></tr>
 <tr><td>Draft</td><td>{{ c.draft_name }} (v{{ c.draft_version }}){% if c.draft_b_name %} + B: {{ c.draft_b_name }} ({{ c.ab_split }}% A){% endif %}
 {% if newer_version %}<form method="post" action="/campaigns/{{ c.id }}/switch-draft" style="display:inline;margin-left:8px"><button class="btn small">Switch to v{{ newer_version }} for remaining sends</button></form>{% endif %}</td></tr>
-<tr><td>Schedule</td><td>{{ c.days }} · {{ c.window_start }}–{{ c.window_end }} ({{ c.timezone }}) · start {{ c.start_date }}</td></tr>
-<tr><td>Pace</td><td>{{ c.gap_min_sec }}–{{ c.gap_max_sec }}s gaps · cap {{ c.daily_cap }}/day</td></tr>
+<tr><td>Schedule</td><td>{{ c.sched_summary }} · start {{ c.start_date }}</td></tr>
+<tr><td>Pace</td><td>{{ c.gap_min_sec }}–{{ c.gap_max_sec }}s gaps · cap {{ c.daily_cap }}/day{% if c.hourly_cap %} · {{ c.hourly_cap }}/hour{% endif %}</td></tr>
+<tr><td>Tracking</td><td>{% if c.open_tracking %}👁 open{% endif %}{% if c.click_tracking %} · 🔗 click{% endif %}{% if not c.open_tracking and not c.click_tracking %}<span class="muted">off</span>{% endif %}</td></tr>
 </table>
 
 <h2>Recent replies</h2>
@@ -52,9 +62,18 @@
 {% for r in replies %}<tr><td>{{ r.received_at[:16].replace('T',' ') }}</td><td>{{ r.from_email }}</td><td><span class="pill cat">{{ r.category }}</span></td><td>{{ r.subject }}</td></tr>
 {% else %}<tr><td colspan="4" class="muted">No replies yet.</td></tr>{% endfor %}</table>
 
-<h2>Send log <span class="muted">(latest 100)</span></h2>
+<h2>Send log</h2>
+<form method="get" action="/campaigns/{{ c.id }}" class="inline-form">
+<input type="text" name="q" value="{{ sq }}" placeholder="Search email…">
+<select name="status"><option value="">all statuses</option>
+<option value="sent" {% if sstatus=='sent' %}selected{% endif %}>sent</option>
+<option value="failed" {% if sstatus=='failed' %}selected{% endif %}>failed</option></select>
+<button class="btn">Search</button>
+{% if sq or sstatus %}<a class="btn" href="/campaigns/{{ c.id }}">Clear</a>{% endif %}
+</form>
 <table><tr><th>When</th><th>To</th><th>Variant</th><th>Status</th><th>SMTP response</th></tr>
 {% for x in sends %}<tr><td>{{ (x.sent_at or '')[:19].replace('T',' ') }}</td><td>{{ x.email }}</td><td>{{ x.variant }}</td><td>{{ x.status }}</td><td class="muted">{{ (x.smtp_status or '')[:60] }}</td></tr>{% endfor %}</table>
+{% set base = '/campaigns/%d'|format(c.id) %}{% set pg = spg %}{% set q = sq %}{% set status = sstatus %}{% include "_pager.html" %}
 {% endblock %}
 {% block scripts %}
 <script>

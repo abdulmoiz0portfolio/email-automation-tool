@@ -2,6 +2,7 @@
 {% block content %}
 <h1>Map your columns → our fields</h1>
 <p class="muted">File: <strong>{{ filename }}</strong> · {{ nrows }} rows. <strong>Email is required</strong> — rows without a valid email go to the Invalid list, not deleted.</p>
+<p class="muted">💡 Any column you leave unmapped is <strong>auto-saved as a custom field</strong> (e.g. <code>{{industry}}</code>, <code>{{city}}</code>) — usable in drafts with <code>&#123;&#123;column_name&#125;&#125;</code>.</p>
 <form method="post" action="/contacts/mapping/{{ upload_id }}">
 <table><tr><th>Your column</th><th>Sample value</th><th>Map to</th></tr>
 {% for col in columns %}

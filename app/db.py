@@ -199,6 +199,9 @@ _MIGRATIONS = [
     ("campaigns", "hourly_cap", "INTEGER NOT NULL DEFAULT 0"),
     ("campaign_contacts", "step", "INTEGER NOT NULL DEFAULT 1"),
     ("campaign_contacts", "step_due_at", "TEXT"),
+    ("accounts", "hourly_cap", "INTEGER NOT NULL DEFAULT 0"),
+    ("import_jobs", "list_id", "INTEGER"),
+    ("import_jobs", "summary", "TEXT"),
 ]
 
 

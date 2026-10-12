@@ -4,6 +4,13 @@
 <h1>Campaigns</h1>
 <a class="btn primary" href="/campaigns/new">+ New campaign</a>
 </div>
+<form method="get" action="/campaigns" class="inline-form">
+<input type="text" name="q" value="{{ q }}" placeholder="Search campaigns…">
+<select name="status"><option value="">all statuses</option>
+{% for st in statuses %}<option value="{{ st }}" {% if status==st %}selected{% endif %}>{{ st }}</option>{% endfor %}</select>
+<button class="btn">Search</button>
+{% if q or status %}<a class="btn" href="/campaigns">Clear</a>{% endif %}
+</form>
 <table>
 <tr><th>Name</th><th>List</th><th>Account</th><th>Status</th><th>Sent</th><th>Replies</th><th></th></tr>
 {% for c in campaigns %}
@@ -18,4 +25,5 @@
 <tr><td colspan="7" class="muted">No campaigns yet.</td></tr>
 {% endfor %}
 </table>
+{% set base = '/campaigns' %}{% include "_pager.html" %}
 {% endblock %}

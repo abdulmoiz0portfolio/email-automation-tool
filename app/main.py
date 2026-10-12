@@ -177,6 +177,29 @@ def redir(url, flash=None, kind="info"):
     return RedirectResponse(url, status_code=303)
 
 
+def page_params(request: Request, default_per=50):
+    """?page=&per_page=&q=&status= — shared by all paginated list pages."""
+    try:
+        page = max(1, int(request.query_params.get("page", "1")))
+    except (ValueError, TypeError):
+        page = 1
+    try:
+        per = int(request.query_params.get("per_page", str(default_per)))
+    except (ValueError, TypeError):
+        per = default_per
+    per = max(10, min(200, per))
+    return page, per, (request.query_params.get("q") or "").strip(), \
+        (request.query_params.get("status") or "").strip()
+
+
+def pager(total: int, page: int, per: int):
+    pages = max(1, (total + per - 1) // per)
+    page = min(page, pages)
+    return {"total": total, "page": page, "per": per, "pages": pages,
+            "offset": (page - 1) * per,
+            "has_prev": page > 1, "has_next": page < pages}
+
+
 # ---------------- dashboard ----------------
 
 @app.get("/", response_class=HTMLResponse)
@@ -230,14 +253,28 @@ def _campaign_stats(cid):
 
 @app.get("/campaigns", response_class=HTMLResponse)
 def campaigns_list(request: Request):
+    page, per, q, status = page_params(request, 20)
+    where, params = [], []
+    if q:
+        where.append("c.name LIKE ?"); params.append(f"%{q}%")
+    if status:
+        where.append("c.status = ?"); params.append(status)
+    w = ("WHERE " + " AND ".join(where)) if where else ""
     conn = db.get_db()
+    total = conn.execute(f"SELECT COUNT(*) c FROM campaigns c {w}", params).fetchone()["c"]
+    pg = pager(total, page, per)
     rows = []
-    for c in conn.execute("""SELECT c.*, l.name list_name, a.label account_label
+    for c in conn.execute(f"""SELECT c.*, l.name list_name, a.label account_label
                              FROM campaigns c JOIN contact_lists l ON l.id=c.list_id
                              JOIN accounts a ON a.id=c.account_id
-                             ORDER BY c.id DESC""").fetchall():
+                             {w} ORDER BY c.id DESC LIMIT ? OFFSET ?""",
+                          params + [pg["per"], pg["offset"]]).fetchall():
         rows.append({**dict(c), **_campaign_stats(c["id"])})
-    return templates.TemplateResponse(request, "campaigns.html", base_ctx(request, "campaigns", campaigns=rows))
+    statuses = [r["status"] for r in conn.execute(
+        "SELECT DISTINCT status FROM campaigns ORDER BY status").fetchall()]
+    return templates.TemplateResponse(request, "campaigns.html", base_ctx(
+        request, "campaigns", campaigns=rows, pg=pg, q=q, status=status,
+        statuses=statuses))
 
 
 @app.get("/campaigns/new", response_class=HTMLResponse)
@@ -277,13 +314,51 @@ async def campaign_create(request: Request):
         dv_b = db.get_db().execute(
             "SELECT MAX(version) v FROM draft_versions WHERE draft_id=?", (g("draft_b_id"),)).fetchone()["v"]
     s = {r["key"]: r["value"] for r in db.get_db().execute("SELECT key, value FROM settings")}
+    # --- schedule mode: continuous (days+window) or explicit time slots ---
+    schedule_mode = g("schedule_mode", "continuous")
+    if schedule_mode not in ("continuous", "slots"):
+        schedule_mode = "continuous"
+    slots = []
+    if schedule_mode == "slots":
+        for i in range(21):
+            d_ = form.get(f"slot_day_{i}")
+            if d_ is None or d_ == "":
+                continue
+            st_, en_ = form.get(f"slot_start_{i}", "09:00"), form.get(f"slot_end_{i}", "17:00")
+            try:
+                day_i = int(d_)
+                if 0 <= day_i <= 6 and st_ < en_:
+                    slots.append({"day": day_i, "start": st_, "end": en_})
+            except (ValueError, TypeError):
+                continue
+        if not slots:
+            schedule_mode = "continuous"  # no valid slots -> fall back
+    try:
+        hourly_cap = max(0, min(1000, int(g("hourly_cap") or 0)))
+    except ValueError:
+        hourly_cap = 0
+    # --- follow-up steps: (draft_id, delay_days) pairs from the wizard ---
+    followups = []
+    for i in range(10):
+        fd = form.get(f"fup_draft_{i}")
+        if not fd:
+            continue
+        try:
+            delay = max(1, min(90, int(form.get(f"fup_delay_{i}") or 3)))
+        except ValueError:
+            delay = 3
+        fver = db.get_db().execute(
+            "SELECT MAX(version) v FROM draft_versions WHERE draft_id=?", (fd,)).fetchone()["v"]
+        if fver:
+            followups.append({"draft_id": int(fd), "draft_version": fver, "delay_days": delay})
     def _do(conn):
         cur = conn.execute(
             """INSERT INTO campaigns(name, list_id, account_id, draft_id, draft_version,
                draft_b_id, draft_b_version, ab_split, days_of_week, window_start, window_end,
                timezone, gap_min_sec, gap_max_sec, daily_cap, start_date, status,
-               mailing_address, open_tracking, click_tracking, created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?,?)""",
+               mailing_address, open_tracking, click_tracking,
+               schedule_mode, send_slots, hourly_cap, created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?)""",
             (g("name"), int(g("list_id")), int(g("account_id")), int(g("draft_id")),
              dv["v"], int(g("draft_b_id")) if g("draft_b_id") else None, dv_b,
              int(g("ab_split") or 50), days, g("window_start", "09:00"),
@@ -292,7 +367,16 @@ async def campaign_create(request: Request):
              int(g("daily_cap") or 80), g("start_date"), "active",
              g("mailing_address", ""),
              1 if g("open_tracking") else 0, 1 if g("click_tracking") else 0,
+             schedule_mode, json.dumps(slots), hourly_cap,
              utcnow_s()))
+        cid = cur.lastrowid
+        # follow-up sequence: step 1 = main draft (implicit), steps 2+ stored here
+        for order, fu in enumerate(followups, start=2):
+            conn.execute(
+                """INSERT INTO campaign_steps(campaign_id, step_order, draft_id,
+                   draft_version, delay_days, created_at) VALUES(?,?,?,?,?,?)""",
+                (cid, order, fu["draft_id"], fu["draft_version"],
+                 fu["delay_days"], utcnow_s()))
         cid = cur.lastrowid
         # snapshot contacts
         conn.execute(
@@ -340,13 +424,42 @@ def campaign_detail(request: Request, cid: int):
     replies = [dict(r) for r in conn.execute(
         """SELECT r.* FROM replies r JOIN sends s ON s.id=r.send_id
            WHERE s.campaign_id=? ORDER BY r.received_at DESC LIMIT 50""", (cid,)).fetchall()]
+    steps = [dict(r) for r in conn.execute(
+        """SELECT cs.step_order, cs.delay_days, cs.draft_version, d.name draft_name
+           FROM campaign_steps cs JOIN drafts d ON d.id=cs.draft_id
+           WHERE cs.campaign_id=? ORDER BY cs.step_order""", (cid,)).fetchall()]
+    # schedule summary for display
+    sched = ""
+    if c.get("schedule_mode") == "slots":
+        try:
+            slots = json.loads(c.get("send_slots") or "[]")
+        except Exception:
+            slots = []
+        day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        sched = "; ".join(f"{day_names[s['day']]} {s['start']}-{s['end']}" for s in slots) or "no slots"
+    else:
+        sched = f"{c['days']} · {c['window_start']}-{c['window_end']} ({c['timezone']})"
+    c["sched_summary"] = sched
+    page, per, sq, sstatus = page_params(request, 50)
+    sw, sp = [], []
+    if sq:
+        sw.append("c.email LIKE ?"); sp.append(f"%{sq}%")
+    if sstatus:
+        sw.append("s.status = ?"); sp.append(sstatus)
+    swhere = ("AND " + " AND ".join(sw)) if sw else ""
+    stotal = conn.execute(
+        f"""SELECT COUNT(*) c FROM sends s JOIN contacts c ON c.id=s.contact_id
+            WHERE s.campaign_id=? {swhere}""", [cid] + sp).fetchone()["c"]
+    spg = pager(stotal, page, per)
     sends = [dict(r) for r in conn.execute(
-        """SELECT s.sent_at, s.variant, s.status, s.smtp_status, c.email FROM sends s
-           JOIN contacts c ON c.id=s.contact_id WHERE s.campaign_id=?
-           ORDER BY s.id DESC LIMIT 100""", (cid,)).fetchall()]
+        f"""SELECT s.sent_at, s.variant, s.status, s.smtp_status, c.email FROM sends s
+           JOIN contacts c ON c.id=s.contact_id WHERE s.campaign_id=? {swhere}
+           ORDER BY s.id DESC LIMIT ? OFFSET ?""",
+        [cid] + sp + [spg["per"], spg["offset"]]).fetchall()]
     return templates.TemplateResponse(request, "campaign_detail.html", base_ctx(
         request, "campaigns", c=c, s=stats, ab=ab, replies=replies,
-        sends=sends, newer_version=newer))
+        sends=sends, newer_version=newer, steps=steps,
+        spg=spg, sq=sq, sstatus=sstatus))
 
 
 @app.post("/campaigns/{cid}/pause")
@@ -450,16 +563,56 @@ def api_checklist(account_id: int):
     return {"items": items}
 
 
+# ---------------- sends (global log) ----------------
+
+@app.get("/sends", response_class=HTMLResponse)
+def sends_page(request: Request):
+    page, per, q, status = page_params(request, 50)
+    where, params = [], []
+    if q:
+        where.append("(c.email LIKE ? OR cp.name LIKE ?)")
+        params += [f"%{q}%", f"%{q}%"]
+    if status:
+        where.append("s.status = ?"); params.append(status)
+    w = ("WHERE " + " AND ".join(where)) if where else ""
+    conn = db.get_db()
+    total = conn.execute(
+        f"""SELECT COUNT(*) c FROM sends s JOIN contacts c ON c.id=s.contact_id
+            JOIN campaigns cp ON cp.id=s.campaign_id {w}""", params).fetchone()["c"]
+    pg = pager(total, page, per)
+    rows = [dict(r) for r in conn.execute(
+        f"""SELECT s.id, s.sent_at, s.variant, s.status, s.smtp_status, s.opened_at,
+                   c.email, cp.name campaign_name,
+                   (SELECT COUNT(*) FROM clicks k WHERE k.send_id=s.id) clicks
+            FROM sends s JOIN contacts c ON c.id=s.contact_id
+            JOIN campaigns cp ON cp.id=s.campaign_id
+            {w} ORDER BY s.id DESC LIMIT ? OFFSET ?""",
+        params + [pg["per"], pg["offset"]]).fetchall()]
+    statuses = [r["status"] for r in conn.execute(
+        "SELECT DISTINCT status FROM sends ORDER BY status").fetchall()]
+    return templates.TemplateResponse(request, "sends.html", base_ctx(
+        request, "sends", rows=rows, pg=pg, q=q, status=status, statuses=statuses))
+
+
 # ---------------- contacts ----------------
 
 @app.get("/contacts", response_class=HTMLResponse)
 def contacts_page(request: Request):
+    page, per, q, _ = page_params(request, 20)
+    where, params = [], []
+    if q:
+        where.append("l.name LIKE ?"); params.append(f"%{q}%")
+    w = ("WHERE " + " AND ".join(where)) if where else ""
     conn = db.get_db()
+    total = conn.execute(f"SELECT COUNT(*) c FROM contact_lists l {w}", params).fetchone()["c"]
+    pg = pager(total, page, per)
     lists = [dict(r) for r in conn.execute(
-        """SELECT l.*, (SELECT COUNT(*) FROM contacts WHERE list_id=l.id) count,
+        f"""SELECT l.*, (SELECT COUNT(*) FROM contacts WHERE list_id=l.id) count,
            (SELECT COUNT(*) FROM invalid_rows WHERE list_id=l.id) invalid
-           FROM contact_lists l ORDER BY l.id DESC""").fetchall()]
-    return templates.TemplateResponse(request, "contacts.html", base_ctx(request, "contacts", lists=lists))
+           FROM contact_lists l {w} ORDER BY l.id DESC LIMIT ? OFFSET ?""",
+        params + [pg["per"], pg["offset"]]).fetchall()]
+    return templates.TemplateResponse(request, "contacts.html", base_ctx(
+        request, "contacts", lists=lists, pg=pg, q=q))
 
 
 def _parse_rows(data: bytes, filename: str, sheet: str | None = None):
@@ -554,7 +707,7 @@ async def contacts_upload_staged(request: Request):
     out_uid = uuid.uuid4().hex
     with open(os.path.join(UPLOAD_DIR, out_uid + ".json"), "w") as f:
         json.dump({"filename": meta["filename"], "list_name": name,
-                   "headers": headers, "rows": rows[:20000],
+                   "headers": headers, "rows": rows[:100000],
                    "sheet": sheet or "(active)"}, f)
     for p in (raw_path, meta_path):
         try:
@@ -576,7 +729,7 @@ def contacts_upload(request: Request, file: UploadFile = File(...), name: str = 
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     with open(os.path.join(UPLOAD_DIR, uid + ".json"), "w") as f:
         json.dump({"filename": file.filename, "list_name": name,
-                   "headers": headers, "rows": rows[:20000]}, f)
+                   "headers": headers, "rows": rows[:100000]}, f)
     return RedirectResponse(f"/contacts/mapping/{uid}", status_code=303)
 
 
@@ -612,10 +765,90 @@ def mapping_page(request: Request, uid: str):
         guess=guess, nrows=len(up["rows"]), list_name=up["list_name"]))
 
 
+def _sanitize_custom_key(header: str) -> str:
+    """Turn an arbitrary CSV column header into a safe {{variable}} name."""
+    key = re.sub(r"[^a-z0-9_]+", "_", (header or "").strip().lower()).strip("_")
+    return key[:60] or "field"
+
+
+def _run_import_job(job_id: str, uid: str, col2field: dict, list_name: str):
+    """Background chunked import: validates rows in chunks of 1000 and updates
+    import_jobs.processed so the UI can show progress for 20k+ row files."""
+    path = os.path.join(UPLOAD_DIR, uid + ".json")
+    try:
+        up = json.load(open(path))
+        rows = up["rows"]
+        db.tx(lambda c: c.execute(
+            "UPDATE import_jobs SET status='running', total=? WHERE id=?",
+            (len(rows), job_id)))
+
+        def _do(conn):
+            cur = conn.execute("INSERT INTO contact_lists(name, created_at) VALUES(?,?)",
+                               (list_name, utcnow_s()))
+            lid = cur.lastrowid
+            seen = set()
+            added = invalid = dupes = suppressed = 0
+            for i, row in enumerate(rows):
+                mapped = {f: (row.get(h) or "").strip() for h, f in col2field.items()}
+                # auto-map: every unmapped column becomes a custom field
+                extras = {}
+                for h in up["headers"]:
+                    if h not in col2field and (row.get(h) or "").strip():
+                        extras[_sanitize_custom_key(h)] = (row.get(h) or "").strip()
+                email = mapped.get("email", "").strip().lower()
+                if not email:
+                    conn.execute("INSERT INTO invalid_rows(list_id, row_data, reason, created_at) VALUES(?,?,?,?)",
+                                 (lid, json.dumps(row)[:500], "missing email", utcnow_s()))
+                    invalid += 1
+                else:
+                    ok, reason = mailmod.validate_email(email)
+                    if not ok:
+                        conn.execute("INSERT INTO invalid_rows(list_id, row_data, reason, created_at) VALUES(?,?,?,?)",
+                                     (lid, json.dumps(row)[:500], f"invalid email: {reason}", utcnow_s()))
+                        invalid += 1
+                    elif email in seen:
+                        dupes += 1
+                    else:
+                        seen.add(email)
+                        dnc = 1 if conn.execute("SELECT 1 FROM suppression WHERE email=?",
+                                               (email,)).fetchone() else 0
+                        if dnc:
+                            suppressed += 1
+                        conn.execute(
+                            """INSERT INTO contacts(list_id, email, first_name, last_name, company,
+                               custom_1, custom_2, custom_3, custom_fields, valid, do_not_contact, created_at)
+                               VALUES(?,?,?,?,?,?,?,?,?,1,?,?)""",
+                            (lid, email, mapped.get("first_name", ""), mapped.get("last_name", ""),
+                             mapped.get("company", ""), mapped.get("custom_1", ""),
+                             mapped.get("custom_2", ""), mapped.get("custom_3", ""),
+                             json.dumps(extras), dnc, utcnow_s()))
+                        added += 1
+                if (i + 1) % 1000 == 0:
+                    conn.execute("UPDATE import_jobs SET processed=? WHERE id=?", (i + 1, job_id))
+                    conn.commit()
+            return lid, added, invalid, dupes, suppressed
+        lid, added, invalid, dupes, suppressed = db.tx(_do)
+        summary = (f"Imported {added} contacts · {invalid} invalid quarantined · "
+                   f"{dupes} duplicates merged · {suppressed} already suppressed.")
+        db.tx(lambda c: c.execute(
+            "UPDATE import_jobs SET status='done', processed=total, list_id=?, summary=? WHERE id=?",
+            (lid, summary, job_id)))
+    except Exception as e:
+        db.tx(lambda c: c.execute(
+            "UPDATE import_jobs SET status='error', error=? WHERE id=?", (str(e)[:500], job_id)))
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 @app.post("/contacts/mapping/{uid}")
 async def mapping_import(request: Request, uid: str):
     form = await request.form()
     path = os.path.join(UPLOAD_DIR, uid + ".json")
+    if not os.path.exists(path):
+        return redir("/contacts", "Upload expired — please upload again.", "err")
     up = json.load(open(path))
     headers = up["headers"]
     col2field = {}
@@ -626,50 +859,33 @@ async def mapping_import(request: Request, uid: str):
     if "email" not in col2field.values():
         return redir(f"/contacts/mapping/{uid}", "You must map a column to Email.", "err")
     list_name = form.get("list_name") or up["list_name"]
+    job_id = uuid.uuid4().hex[:12]
+    db.tx(lambda c: c.execute(
+        """INSERT INTO import_jobs(id, filename, list_name, status, processed, total,
+           headers, rows_path, created_at) VALUES(?,?,?,?,0,?,?,?,?)""",
+        (job_id, up.get("filename", ""), list_name, "queued",
+         len(up["rows"]), json.dumps(headers), path, utcnow_s())))
+    t = threading.Thread(target=_run_import_job, args=(job_id, uid, col2field, list_name),
+                         daemon=True, name=f"import-{job_id}")
+    t.start()
+    return RedirectResponse(f"/contacts/import-progress/{job_id}", status_code=303)
 
-    def _do(conn):
-        cur = conn.execute("INSERT INTO contact_lists(name, created_at) VALUES(?,?)",
-                           (list_name, utcnow_s()))
-        lid = cur.lastrowid
-        seen = set()
-        added = invalid = dupes = suppressed = 0
-        for row in up["rows"]:
-            mapped = {f: (row.get(h) or "").strip() for h, f in col2field.items()}
-            email = mapped.get("email", "").strip().lower()
-            if not email:
-                conn.execute("INSERT INTO invalid_rows(list_id, row_data, reason, created_at) VALUES(?,?,?,?)",
-                             (lid, json.dumps(row)[:500], "missing email", utcnow_s()))
-                invalid += 1
-                continue
-            ok, reason = mailmod.validate_email(email)
-            if not ok:
-                conn.execute("INSERT INTO invalid_rows(list_id, row_data, reason, created_at) VALUES(?,?,?,?)",
-                             (lid, json.dumps(row)[:500], f"invalid email: {reason}", utcnow_s()))
-                invalid += 1
-                continue
-            if email in seen:
-                dupes += 1
-                continue
-            seen.add(email)
-            dnc = 1 if conn.execute("SELECT 1 FROM suppression WHERE email=?",
-                                   (email,)).fetchone() else 0
-            if dnc:
-                suppressed += 1
-            conn.execute(
-                """INSERT INTO contacts(list_id, email, first_name, last_name, company,
-                   custom_1, custom_2, custom_3, valid, do_not_contact, created_at)
-                   VALUES(?,?,?,?,?,?,?,?,1,?,?)""",
-                (lid, email, mapped.get("first_name", ""), mapped.get("last_name", ""),
-                 mapped.get("company", ""), mapped.get("custom_1", ""),
-                 mapped.get("custom_2", ""), mapped.get("custom_3", ""),
-                 dnc, utcnow_s()))
-            added += 1
-        return lid, added, invalid, dupes, suppressed
-    lid, added, invalid, dupes, suppressed = db.tx(_do)
-    os.remove(path)
-    return redir(f"/contacts/lists/{lid}",
-                 f"Imported {added} contacts · {invalid} invalid quarantined · {dupes} duplicates merged · {suppressed} already suppressed.",
-                 "info")
+
+@app.get("/contacts/import-progress/{job_id}", response_class=HTMLResponse)
+def import_progress_page(request: Request, job_id: str):
+    job = db.get_db().execute("SELECT * FROM import_jobs WHERE id=?", (job_id,)).fetchone()
+    if not job:
+        raise HTTPException(404)
+    return templates.TemplateResponse(request, "import_progress.html",
+                                      base_ctx(request, "contacts", job=dict(job)))
+
+
+@app.get("/api/import-jobs/{job_id}")
+def api_import_job(job_id: str):
+    job = db.get_db().execute("SELECT * FROM import_jobs WHERE id=?", (job_id,)).fetchone()
+    if not job:
+        raise HTTPException(404)
+    return dict(job)
 
 
 @app.get("/contacts/lists/{lid}", response_class=HTMLResponse)
@@ -678,12 +894,28 @@ def list_detail(request: Request, lid: int):
     lst = conn.execute("SELECT * FROM contact_lists WHERE id=?", (lid,)).fetchone()
     if not lst:
         raise HTTPException(404)
+    page, per, q, status = page_params(request, 50)
+    where, params = ["list_id=?"], [lid]
+    if q:
+        where.append("(email LIKE ? OR first_name LIKE ? OR last_name LIKE ? OR company LIKE ?)")
+        params += [f"%{q}%"] * 4
+    if status == "ok":
+        where.append("valid=1 AND do_not_contact=0")
+    elif status == "invalid":
+        where.append("valid=0")
+    elif status == "suppressed":
+        where.append("do_not_contact=1")
+    w = "WHERE " + " AND ".join(where)
+    total = conn.execute(f"SELECT COUNT(*) c FROM contacts {w}", params).fetchone()["c"]
+    pg = pager(total, page, per)
     contacts = [dict(r) for r in conn.execute(
-        "SELECT * FROM contacts WHERE list_id=? ORDER BY id LIMIT 500", (lid,)).fetchall()]
+        f"SELECT * FROM contacts {w} ORDER BY id LIMIT ? OFFSET ?",
+        params + [pg["per"], pg["offset"]]).fetchall()]
     invalid = [dict(r) for r in conn.execute(
-        "SELECT * FROM invalid_rows WHERE list_id=? ORDER BY id", (lid,)).fetchall()]
+        "SELECT * FROM invalid_rows WHERE list_id=? ORDER BY id LIMIT 200", (lid,)).fetchall()]
     return templates.TemplateResponse(request, "list_detail.html", base_ctx(
-        request, "contacts", lst=dict(lst), contacts=contacts, invalid=invalid))
+        request, "contacts", lst=dict(lst), contacts=contacts, invalid=invalid,
+        pg=pg, q=q, status=status, lid=lid))
 
 
 @app.post("/contacts/lists/{lid}/add")
@@ -885,19 +1117,20 @@ def account_create(request: Request, label: str = Form(...), email: str = Form(.
                    imap_host: str = Form(...), imap_port: int = Form(993),
                    imap_user: str = Form(...), imap_pass: str = Form(...),
                    imap_enc: str = Form("SSL"),
-                   imap_enabled: str = Form("")):
+                   imap_enabled: str = Form(""),
+                   hourly_cap: int = Form(0)):
     gate = sudo_or_redirect(request)
     if gate:
         return gate
     def _do(conn):
         cur = conn.execute(
             """INSERT INTO accounts(label, email, smtp_host, smtp_port, smtp_user, smtp_pass_enc, smtp_enc,
-               imap_host, imap_port, imap_user, imap_pass_enc, imap_enc, imap_enabled, status, created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?, 'unknown', ?)""",
+               imap_host, imap_port, imap_user, imap_pass_enc, imap_enc, imap_enabled, hourly_cap, status, created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'unknown', ?)""",
             (label.strip(), email.strip().lower(), smtp_host.strip(), smtp_port,
              smtp_user.strip(), encrypt(smtp_pass), smtp_enc,
              imap_host.strip(), imap_port, imap_user.strip(), encrypt(imap_pass),
-             imap_enc, 1 if imap_enabled else 0, utcnow_s()))
+             imap_enc, 1 if imap_enabled else 0, max(0, min(1000, hourly_cap)), utcnow_s()))
         return cur.lastrowid
     aid = db.tx(_do)
     return redir("/accounts", "Account saved. Run 'Test connection' to verify.", "info")
@@ -1159,16 +1392,33 @@ def deliverability_test(request: Request, draft_id: int = Form(...),
 
 @app.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request):
+    from zoneinfo import available_timezones
     s = {r["key"]: r["value"] for r in db.get_db().execute("SELECT key, value FROM settings")}
-    return templates.TemplateResponse(request, "settings.html", base_ctx(request, "settings", s=s))
+    return templates.TemplateResponse(request, "settings.html", base_ctx(
+        request, "settings", s=s,
+        timezones=sorted(available_timezones())))
+
+
+REPLY_INTERVAL_RE = re.compile(r"^\s*(\d{1,3})\s*(?:-\s*(\d{1,3}))?\s*$")
+
+
+def normalize_reply_interval(raw: str) -> str:
+    """Accept '5' or '5-8' (jitter range, minutes). Returns a clean string."""
+    m = REPLY_INTERVAL_RE.match(raw or "")
+    if not m:
+        return "5"
+    lo = max(2, min(120, int(m.group(1))))
+    hi = max(2, min(120, int(m.group(2) or m.group(1))))
+    lo, hi = min(lo, hi), max(lo, hi)
+    return str(lo) if lo == hi else f"{lo}-{hi}"
 
 
 @app.post("/settings")
 def settings_save(request: Request, timezone: str = Form(...), base_url: str = Form(...),
-                  physical_address: str = Form(""), reply_poll_minutes: int = Form(5)):
+                  physical_address: str = Form(""), reply_poll_minutes: str = Form("5")):
     vals = {"timezone": timezone.strip(), "base_url": base_url.strip().rstrip("/"),
             "physical_address": physical_address.strip(),
-            "reply_poll_minutes": str(max(2, min(60, reply_poll_minutes)))}
+            "reply_poll_minutes": normalize_reply_interval(reply_poll_minutes)}
     db.tx(lambda c: [c.execute("INSERT OR REPLACE INTO settings(key, value) VALUES(?,?)", (k, v))
                      for k, v in vals.items()])
     return redir("/settings", "Settings saved.", "info")

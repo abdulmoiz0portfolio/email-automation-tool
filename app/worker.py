@@ -1,14 +1,19 @@
 """Background worker: send-queue processor + IMAP reply watcher.
 
-Runs in a thread inside the web process. Idempotent: a contact is claimed
-with an atomic UPDATE ... WHERE status='queued'; UNIQUE(campaign_id,contact_id)
-plus per-send message_id/unsub_token make double-sends impossible across
-restarts. On startup, rows stuck in 'sending' are failed and released.
+Runs in a thread inside the web process. Per-account parallelism via
+ThreadPoolExecutor (a slow SMTP/IMAP account never blocks other accounts).
+Idempotent: a contact is claimed with an atomic UPDATE ... WHERE
+status='queued'; UNIQUE(campaign_id,contact_id) plus per-send
+message_id/unsub_token make double-sends impossible across restarts.
+On startup, rows stuck in 'sending' are failed and released.
 """
+import json
 import random
+import re
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from email.utils import make_msgid
 from zoneinfo import ZoneInfo
@@ -18,6 +23,23 @@ from . import mail as mailmod
 
 STOP = threading.Event()
 WORKER_THREAD = None
+_EXECUTOR = None
+_EXECUTOR_LOCK = threading.Lock()
+_CAMPAIGN_LOCKS = {}
+_CAMPAIGN_LOCKS_GUARD = threading.Lock()
+
+
+def _executor():
+    global _EXECUTOR
+    with _EXECUTOR_LOCK:
+        if _EXECUTOR is None:
+            _EXECUTOR = ThreadPoolExecutor(max_workers=6, thread_name_prefix="emailtool")
+        return _EXECUTOR
+
+
+def _campaign_lock(cid):
+    with _CAMPAIGN_LOCKS_GUARD:
+        return _CAMPAIGN_LOCKS.setdefault(cid, threading.Lock())
 
 
 def utcnow():
@@ -58,6 +80,21 @@ def campaign_now(campaign):
 
 def in_window(campaign, now=None):
     now = now or campaign_now(campaign)
+    if (campaign.get("schedule_mode") or "continuous") == "slots":
+        # explicit time slots: [{day:0-6, start:"HH:MM", end:"HH:MM"}]
+        try:
+            slots = json.loads(campaign.get("send_slots") or "[]")
+        except Exception:
+            slots = []
+        cur = now.strftime("%H:%M")
+        wd = now.weekday()
+        for s in slots:
+            try:
+                if int(s.get("day")) == wd and s.get("start") <= cur <= s.get("end"):
+                    return True, ""
+            except (TypeError, ValueError, AttributeError):
+                continue
+        return False, f"outside scheduled slots (now {now.strftime('%a %H:%M')})"
     days = [d for d in (campaign["days_of_week"] or "").split(",") if d != ""]
     if str(now.weekday()) not in days:
         return False, f"today is not a sending day ({now.strftime('%A')})"
@@ -140,14 +177,34 @@ def _account_dict(row):
     return dict(row)
 
 
-def claim_next_contact(campaign_id):
-    """Atomically claim one queued contact. Returns row or None."""
+def sent_last_hour_count(campaign_id):
+    conn = db.get_db()
+    row = conn.execute(
+        "SELECT COUNT(*) c FROM sends WHERE campaign_id=? AND status='sent' "
+        "AND sent_at >= datetime('now','-1 hour')", (campaign_id,)).fetchone()
+    return row["c"]
+
+
+def sent_last_hour_account(account_id):
+    conn = db.get_db()
+    row = conn.execute(
+        "SELECT COUNT(*) c FROM sends s JOIN campaigns c ON c.id=s.campaign_id "
+        "WHERE c.account_id=? AND s.status='sent' AND s.sent_at >= datetime('now','-1 hour')",
+        (account_id,)).fetchone()
+    return row["c"]
+
+
+def claim_next_contact(campaign_id, now=None):
+    """Atomically claim one queued contact whose follow-up step is due.
+    Returns row or None."""
+    now_s = iso(now or utcnow())
     def _do(conn):
         row = conn.execute(
-            """SELECT cc.id, cc.contact_id, c.* FROM campaign_contacts cc
+            """SELECT cc.id, cc.contact_id, cc.step, c.* FROM campaign_contacts cc
                JOIN contacts c ON c.id=cc.contact_id
                WHERE cc.campaign_id=? AND cc.status='queued'
-               ORDER BY cc.id LIMIT 1""", (campaign_id,)).fetchone()
+               AND (cc.step_due_at IS NULL OR cc.step_due_at <= ?)
+               ORDER BY cc.id LIMIT 1""", (campaign_id, now_s)).fetchone()
         if not row:
             return None
         cur = conn.execute(
@@ -187,10 +244,18 @@ def send_one(campaign, cc):
             "UPDATE campaign_contacts SET status='cancelled' WHERE id=?", (cc["id"],)))
         return False, "suppressed/invalid — cancelled"
 
-    # pick draft version + variant
+    # pick draft version + variant — follow-up steps use their own draft
+    step = int(cc.get("step") or 1)
     variant = "A"
     draft_id, draft_ver = campaign["draft_id"], campaign["draft_version"]
-    if campaign["draft_b_id"]:
+    step_row = None
+    if step > 1:
+        step_row = conn.execute(
+            "SELECT * FROM campaign_steps WHERE campaign_id=? AND step_order=?",
+            (campaign["id"], step)).fetchone()
+        if step_row:
+            draft_id, draft_ver = step_row["draft_id"], step_row["draft_version"]
+    elif campaign["draft_b_id"]:
         variant = "A" if random.randint(1, 100) <= int(campaign["ab_split"] or 50) else "B"
         if variant == "B":
             draft_id, draft_ver = campaign["draft_b_id"], campaign["draft_b_version"]
@@ -199,6 +264,12 @@ def send_one(campaign, cc):
         (draft_id, draft_ver)).fetchone()
     if not dv:
         return False, "draft version missing"
+
+    # thread follow-ups into the same conversation
+    prev = conn.execute(
+        "SELECT message_id FROM sends WHERE campaign_id=? AND contact_id=? AND status='sent' "
+        "ORDER BY sent_at DESC LIMIT 1", (campaign["id"], cc["contact_id"])).fetchone()
+    in_reply_to = prev["message_id"] if prev else None
 
     base_url = get_setting("base_url", "http://localhost:8000").rstrip("/")
     token = uuid.uuid4().hex
@@ -219,13 +290,18 @@ def send_one(campaign, cc):
     msg = mailmod.build_message(account["email"], contact["email"], subject,
                                 body_html, message_id, unsub_url,
                                 campaign["mailing_address"] or get_setting("physical_address", ""),
-                                reply_to=account["email"])
+                                reply_to=account["email"], in_reply_to=in_reply_to)
 
     acct = dict(account, smtp_pass=account["smtp_pass_enc"], _enc=True)
     ok, resp = mailmod.smtp_send(acct, msg)
 
     now_s = iso(utcnow())
     if ok:
+        # schedule the next follow-up step (if any) instead of marking sent
+        next_step = conn.execute(
+            "SELECT delay_days FROM campaign_steps WHERE campaign_id=? AND step_order=?",
+            (campaign["id"], step + 1)).fetchone()
+
         def _ok(c):
             c.execute(
                 """INSERT INTO sends(campaign_id, contact_id, draft_version, variant,
@@ -233,9 +309,16 @@ def send_one(campaign, cc):
                    VALUES(?,?,?,?,?,?,?, 'sent', ?)""",
                 (campaign["id"], cc["contact_id"], draft_ver, variant,
                  message_id, token, now_s, resp[:300]))
-            c.execute(
-                "UPDATE campaign_contacts SET status='sent', sent_at=?, draft_version=?, variant=? WHERE id=?",
-                (now_s, draft_ver, variant, cc["id"]))
+            if next_step:
+                due = utcnow() + timedelta(days=int(next_step["delay_days"]))
+                c.execute(
+                    "UPDATE campaign_contacts SET status='queued', sent_at=?, draft_version=?, "
+                    "variant=?, step=?, step_due_at=? WHERE id=?",
+                    (now_s, draft_ver, variant, step + 1, iso(due), cc["id"]))
+            else:
+                c.execute(
+                    "UPDATE campaign_contacts SET status='sent', sent_at=?, draft_version=?, variant=? WHERE id=?",
+                    (now_s, draft_ver, variant, cc["id"]))
             gap = random.randint(int(campaign["gap_min_sec"]), int(campaign["gap_max_sec"]))
             c.execute("UPDATE campaigns SET next_due_at=? WHERE id=?",
                       (iso(utcnow() + timedelta(seconds=gap)), campaign["id"]))
@@ -266,20 +349,17 @@ def send_one(campaign, cc):
         return False, resp[:200]
 
 
-def process_campaigns(now=None):
-    now = now or utcnow()
-    conn = db.get_db()
-    campaigns = conn.execute(
-        "SELECT * FROM campaigns WHERE status IN ('active','scheduled')").fetchall()
-    for camp in campaigns:
-        camp = dict(camp)
+def _process_one_campaign(camp, now):
+    """Send a single due email for one campaign. Holds a per-campaign lock so
+    parallel account workers never violate the campaign's gap pacing."""
+    with _campaign_lock(camp["id"]):
         # start date gate
         try:
             start = datetime.fromisoformat(camp["start_date"]).date()
         except Exception:
             start = now.date()
         if start > campaign_now(camp).date():
-            continue
+            return
         if camp["status"] == "scheduled":
             db.tx(lambda c: c.execute("UPDATE campaigns SET status='active' WHERE id=?",
                                       (camp["id"],)))
@@ -287,21 +367,29 @@ def process_campaigns(now=None):
 
         ok, why = in_window(camp)
         if not ok:
-            continue
+            return
         due = parse_iso(camp["next_due_at"])
         if due and now < due:
-            continue
+            return
 
+        conn = db.get_db()
         account = conn.execute("SELECT * FROM accounts WHERE id=?",
                                (camp["account_id"],)).fetchone()
         if not account or account["status"] not in ("connected", "unknown"):
-            continue
+            return
         account = dict(account)
         cap, warming = effective_daily_cap(account, camp, now)
         if sent_today_count(account["id"], iso(now)) >= cap:
-            continue
+            return
+        # hourly caps: campaign-level and account-level
+        hcap = int(camp.get("hourly_cap") or 0)
+        if hcap and sent_last_hour_count(camp["id"]) >= hcap:
+            return
+        ahcap = int(account.get("hourly_cap") or 0)
+        if ahcap and sent_last_hour_account(account["id"]) >= ahcap:
+            return
 
-        cc = claim_next_contact(camp["id"])
+        cc = claim_next_contact(camp["id"], now)
         if not cc:
             # nothing left queued → completed (if no sending either)
             left = conn.execute(
@@ -310,29 +398,66 @@ def process_campaigns(now=None):
             if left == 0:
                 db.tx(lambda c: c.execute(
                     "UPDATE campaigns SET status='completed' WHERE id=?", (camp["id"],)))
-            continue
+            return
         send_one(camp, cc)
+
+
+def process_campaigns(now=None):
+    """Group active campaigns by account and process each account's campaigns
+    in the shared thread pool — a slow SMTP/IMAP account never blocks others."""
+    now = now or utcnow()
+    conn = db.get_db()
+    campaigns = conn.execute(
+        "SELECT * FROM campaigns WHERE status IN ('active','scheduled')").fetchall()
+    by_account = {}
+    for camp in campaigns:
+        by_account.setdefault(camp["account_id"], []).append(dict(camp))
+    ex = _executor()
+    futures = []
+    for camps in by_account.values():
+        def _run(camps=camps, now=now):
+            for camp in camps:
+                try:
+                    _process_one_campaign(camp, now)
+                except Exception:
+                    pass
+        futures.append(ex.submit(_run))
+    for f in futures:
+        try:
+            f.result()
+        except Exception:
+            pass
 
 
 # ---------- IMAP reply watcher ----------
 
-def poll_inboxes():
-    conn = db.get_db()
-    accounts = conn.execute("SELECT * FROM accounts").fetchall()
-    for a in accounts:
-        a = dict(a)
-        if not int(a.get("imap_enabled", 1)):
-            continue  # send-only account: no reply monitoring
+def _poll_one_account(a):
+    if not int(a.get("imap_enabled", 1)):
+        return  # send-only account: no reply monitoring
+    try:
+        replies = mailmod.fetch_unseen_replies(a)
+    except Exception:
+        return
+    for r in replies:
         try:
-            replies = mailmod.fetch_unseen_replies(a)
+            handle_reply(a, r)
+            mailmod.mark_seen(a, r["imap_num"])
         except Exception:
             continue
-        for r in replies:
-            try:
-                handle_reply(a, r)
-                mailmod.mark_seen(a, r["imap_num"])
-            except Exception:
-                continue
+
+
+def poll_inboxes():
+    """Poll each account's inbox in parallel — one slow IMAP server can't
+    stall reply detection for the others."""
+    conn = db.get_db()
+    accounts = [dict(a) for a in conn.execute("SELECT * FROM accounts").fetchall()]
+    ex = _executor()
+    futures = [ex.submit(_poll_one_account, a) for a in accounts]
+    for f in futures:
+        try:
+            f.result()
+        except Exception:
+            continue
 
 
 def find_send_for_reply(r):
@@ -427,6 +552,20 @@ def recover_interrupted():
     db.tx(_do)
 
 
+REPLY_INTERVAL_RE = re.compile(r"^\s*(\d{1,3})\s*(?:-\s*(\d{1,3}))?\s*$")
+
+
+def reply_interval_sec():
+    """Fixed minutes ('5') or jitter range ('5-8') from settings."""
+    raw = get_setting("reply_poll_minutes", "5")
+    m = REPLY_INTERVAL_RE.match(raw or "")
+    if not m:
+        return 300
+    lo = max(1, min(120, int(m.group(1))))
+    hi = max(1, min(120, int(m.group(2) or m.group(1))))
+    return random.randint(min(lo, hi), max(lo, hi)) * 60
+
+
 def worker_loop(poll_interval=20):
     last_inbox = 0
     while not STOP.is_set():
@@ -435,8 +574,7 @@ def worker_loop(poll_interval=20):
         except Exception:
             pass
         try:
-            interval = int(get_setting("reply_poll_minutes", "5")) * 60
-            if time.time() - last_inbox > interval:
+            if time.time() - last_inbox > reply_interval_sec():
                 poll_inboxes()
                 last_inbox = time.time()
         except Exception:

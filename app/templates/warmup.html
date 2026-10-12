@@ -2,6 +2,7 @@
 {% block content %}
 <h1>Override warm-up for {{ a.label }}</h1>
 <div class="card">
+<p><span class="pill warming" title="Daily Send Volume Throttling Ramp">🔥 Warm-up = Daily Send Volume Throttling Ramp</span></p>
 <p>New accounts are capped at <strong>20/day, +10/day</strong> to protect deliverability.
 Overriding removes this protection — sudden high volume from a fresh account can get it flagged as spam.</p>
 <form method="post" action="/accounts/{{ a.id }}/warmup-override">

@@ -4,7 +4,8 @@
 <table><tr><th>Label</th><th>Email</th><th>Health</th><th>Last tested</th><th></th></tr>
 {% for a in accounts %}
 <tr><td><strong>{{ a.label }}</strong></td><td>{{ a.email }}</td>
-<td><span class="pill {{ a.status }}">{{ a.status }}</span>{% if a.last_error %}<div class="err">{{ a.last_error[:120] }}</div>{% endif %}</td>
+<td><span class="pill {{ a.status }}">{{ a.status }}</span>{% if a.last_error %}<div class="err">{{ a.last_error[:120] }}</div>{% endif %}
+{% if a.warm_active %}<div><span class="pill warming" title="Daily Send Volume Throttling Ramp: new accounts start at 20 emails/day, increasing +10/day, to protect domain reputation. Override only if you know the risk.">🔥 warm-up ramp</span></div>{% endif %}</td>
 <td class="muted">{{ (a.last_tested_at or '')[:16].replace('T',' ') }}</td>
 <td>
 <form method="post" action="/accounts/{{ a.id }}/test" style="display:inline"><button class="btn small">🔌 Test connection</button></form>

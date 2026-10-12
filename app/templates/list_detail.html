@@ -6,12 +6,25 @@
 <input type="text" name="first_name" placeholder="first name">
 <input type="text" name="company" placeholder="company">
 <button class="btn">+ Add contact</button></form></div>
-<table><tr><th>Email</th><th>Name</th><th>Company</th><th>Status</th><th></th></tr>
+<form method="get" action="/contacts/lists/{{ lid }}" class="inline-form">
+<input type="text" name="q" value="{{ q }}" placeholder="Search email, name, company…">
+<select name="status">
+<option value="">all</option>
+<option value="ok" {% if status=='ok' %}selected{% endif %}>ok</option>
+<option value="invalid" {% if status=='invalid' %}selected{% endif %}>invalid</option>
+<option value="suppressed" {% if status=='suppressed' %}selected{% endif %}>do not contact</option>
+</select>
+<button class="btn">Search</button>
+{% if q or status %}<a class="btn" href="/contacts/lists/{{ lid }}">Clear</a>{% endif %}
+</form>
+<table><tr><th>Email</th><th>Name</th><th>Company</th><th>Custom fields</th><th>Status</th><th></th></tr>
 {% for c in contacts %}
 <tr><td>{{ c.email }}</td><td>{{ c.first_name }} {{ c.last_name }}</td><td>{{ c.company }}</td>
+<td class="muted">{% if c.custom_fields and c.custom_fields != '{}' %}{{ c.custom_fields[:80] }}{% else %}—{% endif %}</td>
 <td>{% if c.do_not_contact %}<span class="pill unsubscribed">do not contact</span>{% elif not c.valid %}<span class="pill bounced">invalid</span>{% else %}ok{% endif %}</td>
 <td><a href="/contacts/{{ c.id }}/edit">Edit</a></td></tr>
 {% endfor %}</table>
+{% set base = '/contacts/lists/%d'|format(lid) %}{% include "_pager.html" %}
 <h2>Invalid rows ({{ invalid|length }}) <span class="muted">— quarantined, not deleted</span></h2>
 <table><tr><th>Row</th><th>Reason</th></tr>
 {% for r in invalid %}<tr><td class="muted">{{ r.row_data[:120] }}</td><td>{{ r.reason }}</td></tr>

@@ -55,3 +55,13 @@ legend{font-size:13px;color:#5a6b8c}
 table.kv td:first-child{font-weight:600;width:180px}
 code{background:#eef1f7;padding:2px 6px;border-radius:4px}
 @media(max-width:800px){.sidebar{width:64px}.sidebar nav a{font-size:0}.sidebar nav a::first-letter{font-size:16px}.grid2{grid-template-columns:1fr}}
+.pill.warming{background:#fff3d6;border:1px solid #e8c547}
+.pill.unsubscribed{background:#fbdcdc}.pill.bounced{background:#fbdcdc}.pill.queued{background:#eef1f7}
+.pill.sending{background:#e0eaff}.pill.sent{background:#d9f2e3}
+.progress{background:#e9edf5;border-radius:8px;height:22px;overflow:hidden}
+.progress-bar{background:#2f6df6;height:100%;transition:width .3s}
+.pager{display:flex;gap:10px;align-items:center;margin:12px 0;flex-wrap:wrap}
+.inline-form{display:flex;gap:8px;align-items:center;margin:10px 0;flex-wrap:wrap}
+.row-between{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px}
+.fuprow,.slotrow{display:flex;gap:10px;align-items:end;margin:8px 0;flex-wrap:wrap}
+.hidden{display:none}

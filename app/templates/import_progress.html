@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Importing “{{ job.list_name }}”</h1>
+<div class="card">
+<div id="progwrap">
+  <div class="progress"><div id="bar" class="progress-bar" style="width:0%"></div></div>
+  <p id="progtxt" class="muted">Starting…</p>
+</div>
+<div id="donewrap" class="hidden">
+  <p id="summary"></p>
+  <a id="golist" class="btn primary" href="#">Open list →</a>
+</div>
+<div id="errwrap" class="hidden"><p class="err" id="errtxt"></p><a class="btn" href="/contacts">Back to lists</a></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+const jobId = "{{ job.id }}";
+function tick(){
+ fetch('/api/import-jobs/'+jobId).then(r=>r.json()).then(j=>{
+  const pct = j.total ? Math.round(j.processed/j.total*100) : 0;
+  document.getElementById('bar').style.width = pct+'%';
+  document.getElementById('progtxt').textContent = `${j.processed||0} / ${j.total||0} rows (${j.status})…`;
+  if(j.status==='done'){
+   document.getElementById('progwrap').classList.add('hidden');
+   document.getElementById('donewrap').classList.remove('hidden');
+   document.getElementById('summary').textContent = j.summary || 'Import finished.';
+   if(j.list_id) document.getElementById('golist').href = '/contacts/lists/'+j.list_id;
+  } else if(j.status==='error'){
+   document.getElementById('progwrap').classList.add('hidden');
+   document.getElementById('errwrap').classList.remove('hidden');
+   document.getElementById('errtxt').textContent = 'Import failed: '+(j.error||'unknown error');
+  } else setTimeout(tick, 800);
+ });
+}
+tick();
+</script>
+{% endblock %}

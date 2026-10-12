@@ -8,12 +8,18 @@
 <button class="btn primary" id="uploadbtn">Upload → map columns</button>
 <span id="stagestatus" class="muted"></span>
 </form></div>
+<form method="get" action="/contacts" class="inline-form">
+<input type="text" name="q" value="{{ q }}" placeholder="Search lists…">
+<button class="btn">Search</button>
+{% if q %}<a class="btn" href="/contacts">Clear</a>{% endif %}
+</form>
 <table><tr><th>Name</th><th>Contacts</th><th>Invalid</th><th>Uploaded</th><th></th></tr>
 {% for l in lists %}
 <tr><td><a href="/contacts/lists/{{ l.id }}">{{ l.name }}</a></td><td>{{ l.count }}</td><td>{{ l.invalid }}</td><td>{{ l.created_at[:10] }}</td>
 <td><form method="post" action="/contacts/lists/{{ l.id }}/delete" onsubmit="return confirm('Delete this list and ALL its contacts?');"><button class="btn danger small">Delete</button></form></td></tr>
 {% else %}<tr><td colspan="5" class="muted">No lists yet.</td></tr>{% endfor %}
 </table>
+{% set base = '/contacts' %}{% include "_pager.html" %}
 {% endblock %}
 {% block scripts %}
 <script>

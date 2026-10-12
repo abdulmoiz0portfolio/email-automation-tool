@@ -65,6 +65,20 @@ def utcnow_s():
     return datetime.now(timezone.utc).isoformat()
 
 
+def wait_import_job(job_id, timeout=30):
+    """Poll the chunked import job until done; return the created list id."""
+    import time as _time
+    deadline = _time.time() + timeout
+    while _time.time() < deadline:
+        j = client.get(f"/api/import-jobs/{job_id}").json()
+        if j["status"] == "done":
+            assert j["list_id"], j
+            return int(j["list_id"])
+        assert j["status"] != "error", j.get("error")
+        _time.sleep(0.2)
+    raise AssertionError(f"import job {job_id} did not finish in {timeout}s")
+
+
 # ---------- seed helpers ----------
 
 def seed_account(label="Test Gmail", email="sender@example.com"):
@@ -248,7 +262,9 @@ def t_import():
                     data={"map_0": "email", "map_1": "first_name",
                           "map_2": "company", "list_name": "TestList"})
     assert r.status_code == 303, r.status_code
-    lid = int(r.headers["location"].split("/")[-1].split("?")[0])
+    # chunked import runs in background — wait for the job, then get the list
+    job_id = r.headers["location"].rstrip("/").split("/")[-1]
+    lid = wait_import_job(job_id)
     conn = db.get_db()
     n = conn.execute("SELECT COUNT(*) c FROM contacts WHERE list_id=?", (lid,)).fetchone()["c"]
     assert n == 2, f"want 2 contacts, got {n}"

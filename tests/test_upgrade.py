@@ -49,6 +49,20 @@ def utcnow_s():
     return datetime.now(timezone.utc).isoformat()
 
 
+def wait_import_job(job_id, timeout=30):
+    """Poll the chunked import job until done; return the created list id."""
+    import time as _time
+    deadline = _time.time() + timeout
+    while _time.time() < deadline:
+        j = client.get(f"/api/import-jobs/{job_id}").json()
+        if j["status"] == "done":
+            assert j["list_id"], j
+            return int(j["list_id"])
+        assert j["status"] != "error", j.get("error")
+        _time.sleep(0.2)
+    raise AssertionError(f"import job {job_id} did not finish in {timeout}s")
+
+
 def login():
     r = client.post("/setup", data={"username": "admin", "password": "testpass123",
                                     "password2": "testpass123"}, follow_redirects=False)
@@ -114,7 +128,8 @@ def t_import_selected_sheet():
     r = client.post(f"/contacts/mapping/{muid}", follow_redirects=False,
                     data={"map_0": "email", "map_1": "first_name", "list_name": "Q4List"})
     assert r.status_code == 303, r.status_code
-    lid = int(r.headers["location"].split("/")[-1].split("?")[0])
+    job_id = r.headers["location"].rstrip("/").split("/")[-1]
+    lid = wait_import_job(job_id)
     conn = db.get_db()
     emails = [x["email"] for x in conn.execute(
         "SELECT email FROM contacts WHERE list_id=?", (lid,)).fetchall()]

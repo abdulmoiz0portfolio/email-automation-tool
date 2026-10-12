@@ -1,5 +1,6 @@
 """Email plumbing: validation, templating, SMTP send, IMAP reply polling,
 reply classification, and deliverability (SPF/DKIM/DMARC) lookups."""
+import json
 import re
 import smtplib
 import imaplib
@@ -90,7 +91,8 @@ def preview_variations(text: str, n: int = 5, seed: int = 0):
 def render_template(text: str, contact: dict, extra: dict | None = None,
                   rng=None) -> str:
     """Fill {{first_name}} etc. Unknown variables are left as-is.
-    Spintax {a|b} is expanded first so every outgoing email is unique."""
+    Spintax {a|b} is expanded first so every outgoing email is unique.
+    Unlimited custom fields (contacts.custom_fields JSON) are merged in."""
     text = process_spintax(text or "", rng)
     ctx = {
         "first_name": contact.get("first_name", "") or "",
@@ -101,6 +103,14 @@ def render_template(text: str, contact: dict, extra: dict | None = None,
         "custom_2": contact.get("custom_2", "") or "",
         "custom_3": contact.get("custom_3", "") or "",
     }
+    cf = contact.get("custom_fields")
+    if cf:
+        try:
+            parsed = json.loads(cf) if isinstance(cf, str) else cf
+            if isinstance(parsed, dict):
+                ctx.update({str(k): (v or "") for k, v in parsed.items()})
+        except Exception:
+            pass
     if extra:
         ctx.update(extra)
 
@@ -160,12 +170,16 @@ def html_to_text(html: str) -> str:
 
 def build_message(from_email: str, to_email: str, subject: str, body_html: str,
                   message_id: str, unsub_url: str, mailing_address: str,
-                  reply_to: str | None = None) -> EmailMessage:
+                  reply_to: str | None = None, in_reply_to: str | None = None) -> EmailMessage:
     msg = EmailMessage()
     msg["From"] = from_email
     msg["To"] = to_email
     msg["Subject"] = subject
     msg["Message-ID"] = message_id
+    if in_reply_to:
+        # follow-up steps thread into the same conversation
+        msg["In-Reply-To"] = in_reply_to
+        msg["References"] = in_reply_to
     if reply_to:
         msg["Reply-To"] = reply_to
     msg["List-Unsubscribe"] = f"<{unsub_url}>"
