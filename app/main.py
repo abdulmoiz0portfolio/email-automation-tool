@@ -19,7 +19,8 @@ from . import db
 from . import worker as worker_mod
 from . import mail as mailmod
 from . import auth as authmod
-from .crypto import encrypt
+from . import gsheets
+from .crypto import encrypt, decrypt
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(os.path.dirname(BASE), "data", "uploads")
@@ -612,7 +613,8 @@ def contacts_page(request: Request):
            FROM contact_lists l {w} ORDER BY l.id DESC LIMIT ? OFFSET ?""",
         params + [pg["per"], pg["offset"]]).fetchall()]
     return templates.TemplateResponse(request, "contacts.html", base_ctx(
-        request, "contacts", lists=lists, pg=pg, q=q))
+        request, "contacts", lists=lists, pg=pg, q=q,
+        gsheet_key_set=bool(authmod.get_setting("google_sheets_api_key", ""))))
 
 
 def _parse_rows(data: bytes, filename: str, sheet: str | None = None):
@@ -733,6 +735,151 @@ def contacts_upload(request: Request, file: UploadFile = File(...), name: str = 
     return RedirectResponse(f"/contacts/mapping/{uid}", status_code=303)
 
 
+# ---------------- Google Sheets import / sync ----------------
+
+@app.post("/api/contacts/gsheet/tabs")
+async def gsheet_tabs(request: Request):
+    """Given a Google Sheet share URL, return its ID and tab titles.
+
+    Tab listing needs the Sheets API key (no public endpoint exists); without a
+    key, `tabs` is empty and the UI asks the user to type the tab name manually.
+    """
+    body = await request.json()
+    url = (body.get("url") or "").strip()
+    sid = gsheets.parse_sheet_id(url)
+    if not sid:
+        return JSONResponse({"detail": "Could not find a sheet ID in that link. "
+                             "Paste a docs.google.com/spreadsheets/d/... link."},
+                            status_code=400)
+    has_key = bool(authmod.get_setting("google_sheets_api_key", ""))
+    tabs: list[str] = []
+    if has_key:
+        try:
+            tabs = gsheets.get_tabs(sid)
+        except Exception as e:
+            return JSONResponse({"detail": f"Could not read sheet: {e}"}, status_code=400)
+    return {"sheet_id": sid, "tabs": tabs, "has_key": has_key}
+
+
+@app.post("/contacts/gsheet/fetch")
+async def gsheet_fetch(request: Request):
+    """Pull a worksheet tab into the staged-upload format, then go to mapping."""
+    form = await request.form()
+    url = (form.get("url") or "").strip()
+    tab = (form.get("tab") or "").strip() or None
+    name = (form.get("name") or "").strip()
+    sid = gsheets.parse_sheet_id(url)
+    if not sid or not name:
+        return redir("/contacts", "Paste a valid Google Sheet link and a list name.", "err")
+    try:
+        headers, rows = gsheets.fetch_values(sid, tab)
+    except Exception as e:
+        return redir("/contacts", f"Google Sheet error: {e}", "err")
+    if not rows:
+        return redir("/contacts", "Selected sheet has no data rows.", "err")
+    uid = uuid.uuid4().hex
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    with open(os.path.join(UPLOAD_DIR, uid + ".json"), "w") as f:
+        json.dump({"filename": f"Google Sheet: {sid}", "list_name": name,
+                   "headers": headers, "rows": rows[:100000],
+                   "sheet": tab or "(first sheet)",
+                   "gsheet": {"id": sid, "tab": tab, "url": url}}, f)
+    return RedirectResponse(f"/contacts/mapping/{uid}", status_code=303)
+
+
+def _run_gsheet_sync(job_id: str, lid: int):
+    """Background re-pull of a sheet-linked list. Upserts by email:
+    new rows are added, existing rows update name/company/custom fields —
+    do_not_contact / valid flags are never touched."""
+    try:
+        conn = db.get_db()
+        lst = conn.execute("SELECT * FROM contact_lists WHERE id=?", (lid,)).fetchone()
+        if not lst or not lst["gsheet_id"]:
+            raise RuntimeError("List is not linked to a Google Sheet.")
+        mapping = json.loads(lst["gsheet_mapping"] or "{}")
+        headers, rows = gsheets.fetch_values(lst["gsheet_id"], lst["gsheet_tab"])
+        col2field = {h: mapping[h] for h in headers if h in mapping}
+        if "email" not in col2field.values():
+            raise RuntimeError("Stored column mapping has no Email column.")
+
+        def _do(c):
+            existing = {r["email"].lower(): dict(r) for r in c.execute(
+                "SELECT * FROM contacts WHERE list_id=?", (lid,)).fetchall()}
+            added = updated = 0
+            for row in rows:
+                mapped = {f: (row.get(h) or "").strip() for h, f in col2field.items()}
+                extras = {}
+                for h in headers:
+                    if h not in col2field and (row.get(h) or "").strip():
+                        extras[_sanitize_custom_key(h)] = (row.get(h) or "").strip()
+                email = mapped.get("email", "").strip().lower()
+                if not email:
+                    continue
+                ok, _ = mailmod.validate_email(email)
+                if not ok:
+                    continue
+                cur = existing.get(email)
+                if cur is None:
+                    dnc = 1 if c.execute("SELECT 1 FROM suppression WHERE email=?",
+                                         (email,)).fetchone() else 0
+                    cur_fields = dict(extras)
+                    c.execute(
+                        """INSERT INTO contacts(list_id, email, first_name, last_name, company,
+                           custom_1, custom_2, custom_3, custom_fields, valid, do_not_contact, created_at)
+                           VALUES(?,?,?,?,?,?,?,?,?,1,?,?)""",
+                        (lid, email, mapped.get("first_name", ""), mapped.get("last_name", ""),
+                         mapped.get("company", ""), mapped.get("custom_1", ""),
+                         mapped.get("custom_2", ""), mapped.get("custom_3", ""),
+                         json.dumps(cur_fields), dnc, utcnow_s()))
+                    added += 1
+                else:
+                    # never overwrite do_not_contact/valid; only fill in fresh data
+                    cur_fields = json.loads(cur["custom_fields"] or "{}")
+                    cur_fields.update(extras)
+                    c.execute(
+                        """UPDATE contacts SET first_name=?, last_name=?, company=?,
+                           custom_1=?, custom_2=?, custom_3=?, custom_fields=?
+                           WHERE id=?""",
+                        (mapped.get("first_name", "") or cur["first_name"],
+                         mapped.get("last_name", "") or cur["last_name"],
+                         mapped.get("company", "") or cur["company"],
+                         mapped.get("custom_1", "") or cur["custom_1"],
+                         mapped.get("custom_2", "") or cur["custom_2"],
+                         mapped.get("custom_3", "") or cur["custom_3"],
+                         json.dumps(cur_fields), cur["id"]))
+                    updated += 1
+            c.execute("UPDATE contact_lists SET gsheet_synced_at=? WHERE id=?",
+                      (utcnow_s(), lid))
+            return added, updated
+        added, updated = db.tx(_do)
+        summary = f"Synced from Google Sheet: {added} added, {updated} updated."
+        db.tx(lambda c: c.execute(
+            "UPDATE import_jobs SET status='done', processed=total, list_id=?, summary=? WHERE id=?",
+            (lid, summary, job_id)))
+    except Exception as e:
+        db.tx(lambda c: c.execute(
+            "UPDATE import_jobs SET status='error', error=? WHERE id=?", (str(e)[:500], job_id)))
+
+
+@app.post("/contacts/lists/{lid}/gsheet-sync")
+def gsheet_sync(lid: int):
+    """Queue a background re-sync of a Google-Sheet-linked list."""
+    lst = db.get_db().execute(
+        "SELECT * FROM contact_lists WHERE id=? AND gsheet_id IS NOT NULL", (lid,)).fetchone()
+    if not lst:
+        return redir("/contacts", "That list is not linked to a Google Sheet.", "err")
+    job_id = uuid.uuid4().hex[:12]
+    db.tx(lambda c: c.execute(
+        """INSERT INTO import_jobs(id, filename, list_name, status, processed, total,
+           headers, rows_path, created_at, kind) VALUES(?,?,?,?,0,1,'','',?,'sync')""",
+        (job_id, f"Google Sheet sync: {lst['gsheet_url'] or lst['gsheet_id']}",
+         lst["name"], "queued", utcnow_s())))
+    t = threading.Thread(target=_run_gsheet_sync, args=(job_id, lid),
+                         daemon=True, name=f"gsync-{job_id}")
+    t.start()
+    return RedirectResponse(f"/contacts/import-progress/{job_id}", status_code=303)
+
+
 FIELDS = [("email", "Email (required)"), ("first_name", "First name"),
           ("last_name", "Last name"), ("company", "Company"),
           ("custom_1", "Custom 1"), ("custom_2", "Custom 2"), ("custom_3", "Custom 3")]
@@ -771,9 +918,12 @@ def _sanitize_custom_key(header: str) -> str:
     return key[:60] or "field"
 
 
-def _run_import_job(job_id: str, uid: str, col2field: dict, list_name: str):
+def _run_import_job(job_id: str, uid: str, col2field: dict, list_name: str,
+                    gsheet: dict | None = None):
     """Background chunked import: validates rows in chunks of 1000 and updates
-    import_jobs.processed so the UI can show progress for 20k+ row files."""
+    import_jobs.processed so the UI can show progress for 20k+ row files.
+    If `gsheet` is given ({id, tab, url}), the new list is linked to the sheet
+    so it can be re-synced later, and the column mapping is stored for syncs."""
     path = os.path.join(UPLOAD_DIR, uid + ".json")
     try:
         up = json.load(open(path))
@@ -828,6 +978,12 @@ def _run_import_job(job_id: str, uid: str, col2field: dict, list_name: str):
                     conn.commit()
             return lid, added, invalid, dupes, suppressed
         lid, added, invalid, dupes, suppressed = db.tx(_do)
+        if gsheet:
+            db.tx(lambda c: c.execute(
+                """UPDATE contact_lists SET gsheet_id=?, gsheet_tab=?, gsheet_url=?,
+                   gsheet_synced_at=?, gsheet_mapping=? WHERE id=?""",
+                (gsheet.get("id"), gsheet.get("tab"), gsheet.get("url"),
+                 utcnow_s(), json.dumps(col2field), lid)))
         summary = (f"Imported {added} contacts · {invalid} invalid quarantined · "
                    f"{dupes} duplicates merged · {suppressed} already suppressed.")
         db.tx(lambda c: c.execute(
@@ -860,12 +1016,13 @@ async def mapping_import(request: Request, uid: str):
         return redir(f"/contacts/mapping/{uid}", "You must map a column to Email.", "err")
     list_name = form.get("list_name") or up["list_name"]
     job_id = uuid.uuid4().hex[:12]
+    gsheet = up.get("gsheet")
     db.tx(lambda c: c.execute(
         """INSERT INTO import_jobs(id, filename, list_name, status, processed, total,
            headers, rows_path, created_at) VALUES(?,?,?,?,0,?,?,?,?)""",
         (job_id, up.get("filename", ""), list_name, "queued",
          len(up["rows"]), json.dumps(headers), path, utcnow_s())))
-    t = threading.Thread(target=_run_import_job, args=(job_id, uid, col2field, list_name),
+    t = threading.Thread(target=_run_import_job, args=(job_id, uid, col2field, list_name, gsheet),
                          daemon=True, name=f"import-{job_id}")
     t.start()
     return RedirectResponse(f"/contacts/import-progress/{job_id}", status_code=303)
@@ -1396,6 +1553,7 @@ def settings_page(request: Request):
     s = {r["key"]: r["value"] for r in db.get_db().execute("SELECT key, value FROM settings")}
     return templates.TemplateResponse(request, "settings.html", base_ctx(
         request, "settings", s=s,
+        gsheet_key_set=bool(authmod.get_setting("google_sheets_api_key", "")),
         timezones=sorted(available_timezones())))
 
 
@@ -1415,10 +1573,15 @@ def normalize_reply_interval(raw: str) -> str:
 
 @app.post("/settings")
 def settings_save(request: Request, timezone: str = Form(...), base_url: str = Form(...),
-                  physical_address: str = Form(""), reply_poll_minutes: str = Form("5")):
+                  physical_address: str = Form(""), reply_poll_minutes: str = Form("5"),
+                  google_sheets_api_key: str = Form("")):
     vals = {"timezone": timezone.strip(), "base_url": base_url.strip().rstrip("/"),
             "physical_address": physical_address.strip(),
             "reply_poll_minutes": normalize_reply_interval(reply_poll_minutes)}
     db.tx(lambda c: [c.execute("INSERT OR REPLACE INTO settings(key, value) VALUES(?,?)", (k, v))
                      for k, v in vals.items()])
+    key = (google_sheets_api_key or "").strip()
+    # masked placeholder ("••••••••") or empty = keep existing; anything else replaces it
+    if key and not set(key) <= {"\u2022"}:
+        authmod.set_setting("google_sheets_api_key", encrypt(key))
     return redir("/settings", "Settings saved.", "info")

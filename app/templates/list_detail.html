@@ -5,7 +5,10 @@
 <input type="email" name="email" placeholder="email (required)" required>
 <input type="text" name="first_name" placeholder="first name">
 <input type="text" name="company" placeholder="company">
-<button class="btn">+ Add contact</button></form></div>
+<button class="btn">+ Add contact</button></form>
+{% if lst.gsheet_id %}<span class="pill">Google Sheet</span>
+<span class="muted">Tab: {{ lst.gsheet_tab or 'first sheet' }} · Last synced: {{ lst.gsheet_synced_at[:16] if lst.gsheet_synced_at else 'never' }}</span>
+<form method="post" action="/contacts/lists/{{ lst.id }}/gsheet-sync" class="inline-form" style="display:inline"><button class="btn">Sync now</button></form>{% endif %}</div>
 <form method="get" action="/contacts/lists/{{ lid }}" class="inline-form">
 <input type="text" name="q" value="{{ q }}" placeholder="Search email, name, company…">
 <select name="status">

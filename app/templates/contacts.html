@@ -7,6 +7,15 @@
 <input type="text" id="listname" name="name" placeholder="List name" required>
 <button class="btn primary" id="uploadbtn">Upload → map columns</button>
 <span id="stagestatus" class="muted"></span>
+</form>
+<form id="gsheetform" method="post" action="/contacts/gsheet/fetch" class="inline-form" style="margin-top:8px">
+<input type="text" id="gsheeturl" name="url" placeholder="Paste Google Sheet share link…" size="42" required>
+<select id="gsheettab" name="tab" class="hidden" title="Pick the worksheet tab"></select>
+<input type="text" id="gsheettabmanual" name="tab" placeholder="Tab name (e.g. Sheet1)" class="hidden" size="16">
+<input type="text" id="gsheetname" name="name" placeholder="List name" required>
+<button class="btn primary" id="gsheetbtn" type="submit">Fetch → map columns</button>
+<span id="gsheetstatus" class="muted"></span>
+{% if not gsheet_key_set %}<span class="muted">No API key set: sheet must be shared as "Anyone with the link" (key in <a href="/settings">Settings</a>).</span>{% endif %}
 </form></div>
 <form method="get" action="/contacts" class="inline-form">
 <input type="text" name="q" value="{{ q }}" placeholder="Search lists…">
@@ -78,6 +87,47 @@ uploadForm.addEventListener('submit', async (e) => {
     statusEl.textContent = '⚠️ upload failed';
   }
   btn.disabled = false;
+});
+
+// ---- Google Sheet import: load tab list, then fetch ----
+const gsheetUrl = document.getElementById('gsheeturl');
+const gsheetTab = document.getElementById('gsheettab');
+const gsheetTabManual = document.getElementById('gsheettabmanual');
+const gsheetStatus = document.getElementById('gsheetstatus');
+const gsheetHasKey = {{ 'true' if gsheet_key_set else 'false' }};
+
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
+
+gsheetUrl.addEventListener('change', async () => {
+  gsheetTab.classList.add('hidden'); gsheetTab.innerHTML = ''; gsheetTab.disabled = true;
+  gsheetTabManual.classList.add('hidden'); gsheetTabManual.disabled = true;
+  gsheetStatus.textContent = '';
+  const url = gsheetUrl.value.trim();
+  if (!url) return;
+  if (!gsheetHasKey) {
+    // no key: cannot list tabs — user types the tab name (blank = first sheet)
+    gsheetTabManual.classList.remove('hidden'); gsheetTabManual.disabled = false;
+    gsheetStatus.textContent = 'Tab name optional — blank uses the first sheet';
+    return;
+  }
+  gsheetStatus.textContent = 'Loading tabs…';
+  try {
+    const r = await fetch('/api/contacts/gsheet/tabs', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({url})});
+    const j = await r.json();
+    if (!r.ok) { gsheetStatus.textContent = '⚠️ ' + (j.detail || 'could not read sheet'); return; }
+    const tabs = j.tabs || [];
+    if (tabs.length) {
+      gsheetTab.innerHTML = tabs.map(t => `<option value="${esc(t)}">${esc(t)}</option>`).join('');
+      gsheetTab.classList.remove('hidden'); gsheetTab.disabled = false;
+      gsheetStatus.textContent = `Pick a tab (${tabs.length} found)`;
+    } else {
+      gsheetStatus.textContent = '⚠️ no tabs found';
+    }
+  } catch (e) {
+    gsheetStatus.textContent = '⚠️ could not load tabs';
+  }
 });
 </script>
 {% endblock %}

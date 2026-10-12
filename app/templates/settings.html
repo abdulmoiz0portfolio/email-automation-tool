@@ -12,6 +12,10 @@
 <input type="text" name="physical_address" value="{{ s.physical_address }}" placeholder="e.g. Street, City, Pakistan"></label>
 <label>Reply check interval (minutes) <span class="tip" title="How often inboxes are polled for replies. Enter a single number (5) or a jitter range (5-8) — a random interval in the range is used each time, which looks more human.">?</span>
 <input type="text" name="reply_poll_minutes" value="{{ s.reply_poll_minutes }}" placeholder="5 or 5-8" pattern="\d{1,3}(-\d{1,3})?"></label>
+<label>Google Sheets API key <span class="tip" title="Optional. Needed to list sheet tabs and to read sheets that are NOT shared as 'Anyone with the link'. Create one in Google Cloud Console (enable Sheets API). Stored encrypted. Without it, pasted sheets must be shared as 'Anyone with the link' and you type the tab name manually.">?</span>
+<input type="password" name="google_sheets_api_key" autocomplete="new-password"
+{% if gsheet_key_set %}placeholder="•••••••• (saved — leave blank to keep)"{% else %}placeholder="Paste API key (optional)"{% endif %}>
+{% if gsheet_key_set %}<span class="muted">Key saved ✓ — leave blank to keep it.</span>{% endif %}</label>
 <button class="btn primary">Save settings</button>
 </form>
 {% endblock %}

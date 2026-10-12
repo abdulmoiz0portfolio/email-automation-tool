@@ -202,6 +202,12 @@ _MIGRATIONS = [
     ("accounts", "hourly_cap", "INTEGER NOT NULL DEFAULT 0"),
     ("import_jobs", "list_id", "INTEGER"),
     ("import_jobs", "summary", "TEXT"),
+    ("import_jobs", "kind", "TEXT NOT NULL DEFAULT 'import'"),
+    ("contact_lists", "gsheet_id", "TEXT"),
+    ("contact_lists", "gsheet_tab", "TEXT"),
+    ("contact_lists", "gsheet_url", "TEXT"),
+    ("contact_lists", "gsheet_synced_at", "TEXT"),
+    ("contact_lists", "gsheet_mapping", "TEXT"),
 ]
 
 
