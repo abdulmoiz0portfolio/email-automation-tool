@@ -3,6 +3,9 @@ import csv
 import io
 import json
 import os
+import re
+import threading
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
@@ -279,15 +282,17 @@ async def campaign_create(request: Request):
             """INSERT INTO campaigns(name, list_id, account_id, draft_id, draft_version,
                draft_b_id, draft_b_version, ab_split, days_of_week, window_start, window_end,
                timezone, gap_min_sec, gap_max_sec, daily_cap, start_date, status,
-               mailing_address, created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               mailing_address, open_tracking, click_tracking, created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?,?)""",
             (g("name"), int(g("list_id")), int(g("account_id")), int(g("draft_id")),
              dv["v"], int(g("draft_b_id")) if g("draft_b_id") else None, dv_b,
              int(g("ab_split") or 50), days, g("window_start", "09:00"),
              g("window_end", "17:00"), s.get("timezone", "Asia/Karachi"),
              int(g("gap_min_sec") or 60), int(g("gap_max_sec") or 180),
              int(g("daily_cap") or 80), g("start_date"), "active",
-             g("mailing_address", ""), utcnow_s()))
+             g("mailing_address", ""),
+             1 if g("open_tracking") else 0, 1 if g("click_tracking") else 0,
+             utcnow_s()))
         cid = cur.lastrowid
         # snapshot contacts
         conn.execute(
@@ -457,26 +462,106 @@ def contacts_page(request: Request):
     return templates.TemplateResponse(request, "contacts.html", base_ctx(request, "contacts", lists=lists))
 
 
-def _read_upload(file: UploadFile):
-    data = file.file.read()
-    name = (file.filename or "").lower()
+def _parse_rows(data: bytes, filename: str, sheet: str | None = None):
+    """Parse CSV/XLSX bytes into (headers, rows). For XLSX, `sheet` selects the
+    worksheet (defaults to the active sheet)."""
+    name = (filename or "").lower()
     if name.endswith(".csv"):
         text = data.decode("utf-8-sig", errors="replace")
         rows = list(csv.DictReader(io.StringIO(text)))
-        return [r[""] if "" in r else None for r in rows], rows
+        headers = rows[0].keys() if rows else []
+        return list(headers), rows
+    import openpyxl
+    wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    if sheet:
+        if sheet not in wb.sheetnames:
+            raise ValueError(f"Sheet '{sheet}' not found (have: {', '.join(wb.sheetnames)})")
+        ws = wb[sheet]
     else:
-        import openpyxl
-        wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
         ws = wb.active
-        it = ws.iter_rows(values_only=True)
-        headers = [str(h).strip() if h is not None else "" for h in next(it)]
-        rows = []
-        for r in it:
-            if all(v is None or str(v).strip() == "" for v in r):
-                continue
-            rows.append({headers[i]: ("" if v is None else str(v).strip())
-                         for i, v in enumerate(r) if i < len(headers)})
-        return headers, rows
+    it = ws.iter_rows(values_only=True)
+    try:
+        header_row = next(it)
+    except StopIteration:
+        return [], []
+    headers = [str(h).strip() if h is not None else "" for h in header_row]
+    rows = []
+    for r in it:
+        if all(v is None or str(v).strip() == "" for v in r):
+            continue
+        rows.append({headers[i]: ("" if v is None else str(v).strip())
+                     for i, v in enumerate(r) if i < len(headers)})
+    return headers, rows
+
+
+def _read_upload(file: UploadFile):
+    return _parse_rows(file.file.read(), file.filename or "")
+
+
+def _sheet_names(data: bytes, filename: str):
+    """Sheet names for XLSX; empty list for CSV (single sheet)."""
+    if (filename or "").lower().endswith(".csv"):
+        return []
+    import openpyxl
+    wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    return list(wb.sheetnames)
+
+
+@app.post("/api/contacts/stage")
+async def contacts_stage(file: UploadFile = File(...)):
+    """Stage an upload and return its sheet names so the user can pick one
+    before column mapping. The staged file is consumed by /contacts/upload-staged."""
+    data = await file.read()
+    if len(data) > 50 * 1024 * 1024:
+        return JSONResponse({"detail": "File too large (max 50MB)."}, status_code=413)
+    try:
+        sheets = _sheet_names(data, file.filename or "")
+    except Exception as e:
+        return JSONResponse({"detail": f"Could not read file: {e}"}, status_code=400)
+    uid = uuid.uuid4().hex
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    with open(os.path.join(UPLOAD_DIR, f"stage_{uid}.bin"), "wb") as f:
+        f.write(data)
+    with open(os.path.join(UPLOAD_DIR, f"stage_{uid}.meta.json"), "w") as f:
+        json.dump({"filename": file.filename}, f)
+    return {"uid": uid, "sheets": sheets, "filename": file.filename}
+
+
+@app.post("/contacts/upload-staged")
+async def contacts_upload_staged(request: Request):
+    """Finish a staged upload using the user-selected sheet, then go to mapping."""
+    form = await request.form()
+    uid = (form.get("uid") or "").strip()
+    sheet = (form.get("sheet") or "").strip() or None
+    name = (form.get("name") or "").strip()
+    if not uid or not name or not re.fullmatch(r"[0-9a-f]{32}", uid):
+        return JSONResponse({"detail": "Missing upload. Choose the file again."}, status_code=400)
+    raw_path = os.path.join(UPLOAD_DIR, f"stage_{uid}.bin")
+    meta_path = os.path.join(UPLOAD_DIR, f"stage_{uid}.meta.json")
+    if not os.path.exists(raw_path) or not os.path.exists(meta_path):
+        return JSONResponse({"detail": "Upload expired — choose the file again."}, status_code=400)
+    meta = json.load(open(meta_path))
+    with open(raw_path, "rb") as f:
+        data = f.read()
+    try:
+        headers, rows = _parse_rows(data, meta["filename"], sheet)
+    except ValueError as e:
+        return JSONResponse({"detail": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"detail": f"Could not read sheet: {e}"}, status_code=400)
+    if not rows:
+        return JSONResponse({"detail": "Selected sheet has no data rows."}, status_code=400)
+    out_uid = uuid.uuid4().hex
+    with open(os.path.join(UPLOAD_DIR, out_uid + ".json"), "w") as f:
+        json.dump({"filename": meta["filename"], "list_name": name,
+                   "headers": headers, "rows": rows[:20000],
+                   "sheet": sheet or "(active)"}, f)
+    for p in (raw_path, meta_path):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    return {"redirect": f"/contacts/mapping/{out_uid}"}
 
 
 @app.post("/contacts/upload")
@@ -752,6 +837,14 @@ def draft_delete(request: Request, did: int):
     return redir("/drafts", "Draft deleted.", "info")
 
 
+@app.get("/api/drafts/preview-variations")
+def api_preview_variations(subject: str = "", body: str = "", n: int = 5):
+    """Show N random spintax variations of the draft (draft editor button)."""
+    n = max(1, min(10, n))
+    return {"subjects": mailmod.preview_variations(subject, n),
+            "bodies": mailmod.preview_variations(body, n)}
+
+
 @app.get("/api/drafts/preview")
 def api_preview(subject: str = "", body: str = "", contact_id: int = 0):
     conn = db.get_db()
@@ -920,6 +1013,146 @@ def unsubscribe(token: str):
         f"""<html><body style="font-family:sans-serif;max-width:600px;margin:60px auto;text-align:center">
         <h2>✅ Unsubscribed</h2><p><strong>{email}</strong> will never be emailed again.</p>
         <p style="color:#888">No questions asked — you're off the list.</p></body></html>""")
+
+
+# ---------------- open & click tracking (public) ----------------
+
+@app.get("/t/o/{token}.png")
+def track_open(token: str):
+    conn = db.get_db()
+    s = conn.execute("SELECT id, opened_at, campaign_id FROM sends WHERE unsub_token=?",
+                     (token,)).fetchone()
+    if s and not s["opened_at"]:
+        # only count opens for campaigns with tracking enabled
+        c = conn.execute("SELECT open_tracking FROM campaigns WHERE id=?",
+                         (s["campaign_id"],)).fetchone()
+        if c and c["open_tracking"]:
+            db.tx(lambda x: x.execute("UPDATE sends SET opened_at=? WHERE id=?",
+                                      (utcnow_s(), s["id"])))
+    from fastapi.responses import Response
+    return Response(content=mailmod.TRANSPARENT_PNG, media_type="image/png")
+
+
+@app.get("/t/c/{token}")
+def track_click(token: str, url: str = ""):
+    import urllib.parse
+    conn = db.get_db()
+    s = conn.execute("SELECT id, campaign_id FROM sends WHERE unsub_token=?", (token,)).fetchone()
+    dest = (url or "").strip()
+    ok_url = dest.startswith(("http://", "https://"))
+    if s and ok_url:
+        c = conn.execute("SELECT click_tracking FROM campaigns WHERE id=?",
+                         (s["campaign_id"],)).fetchone()
+        if c and c["click_tracking"]:
+            db.tx(lambda x: x.execute(
+                "INSERT INTO clicks(send_id, url, clicked_at) VALUES(?,?,?)",
+                (s["id"], dest[:2000], utcnow_s())))
+    if not ok_url:
+        raise HTTPException(400, "bad target url")
+    return RedirectResponse(dest, status_code=302)
+
+
+# ---------------- deliverability: seed accounts + placement tests ----------------
+
+@app.get("/deliverability", response_class=HTMLResponse)
+def deliverability_page(request: Request):
+    conn = db.get_db()
+    seeds = [dict(r) for r in conn.execute("SELECT * FROM seed_accounts ORDER BY id").fetchall()]
+    tests = [dict(r) for r in conn.execute(
+        "SELECT * FROM deliverability_tests ORDER BY created_at DESC LIMIT 10").fetchall()]
+    for t in tests:
+        t["results_parsed"] = json.loads(t["results"]) if t["results"] else None
+    drafts = [dict(r) for r in conn.execute("SELECT id, name FROM drafts ORDER BY id DESC").fetchall()]
+    accounts = [dict(r) for r in conn.execute("SELECT id, label, email FROM accounts ORDER BY id").fetchall()]
+    return templates.TemplateResponse(request, "deliverability.html", base_ctx(
+        request, "deliverability", seeds=seeds, tests=tests, drafts=drafts, accounts=accounts))
+
+
+@app.post("/seed-accounts")
+def seed_add(request: Request, email: str = Form(...), imap_host: str = Form(...),
+             imap_port: int = Form(993), imap_user: str = Form(...),
+             imap_pass: str = Form(...), provider: str = Form("other")):
+    gate = sudo_or_redirect(request)
+    if gate:
+        return gate
+    db.tx(lambda c: c.execute(
+        """INSERT INTO seed_accounts(email, imap_host, imap_port, imap_user,
+           imap_pass_enc, provider, created_at) VALUES(?,?,?,?,?,?,?)""",
+        (email.strip().lower(), imap_host.strip(), imap_port, imap_user.strip(),
+         encrypt(imap_pass), provider, utcnow_s())))
+    return redir("/deliverability", "Seed inbox added.", "info")
+
+
+@app.post("/seed-accounts/{sid}/delete")
+def seed_delete(request: Request, sid: int):
+    gate = sudo_or_redirect(request)
+    if gate:
+        return gate
+    db.tx(lambda c: c.execute("DELETE FROM seed_accounts WHERE id=?", (sid,)))
+    return redir("/deliverability", "Seed inbox removed.", "info")
+
+
+def _run_deliverability_test(test_id: str, draft_id: int, account_id: int, wait_sec: int = 45):
+    """Background: send the draft to every seed, wait, then check placement."""
+    from email.utils import make_msgid
+    conn = db.get_db()
+    try:
+        seeds = [dict(r) for r in conn.execute("SELECT * FROM seed_accounts ORDER BY id").fetchall()]
+        account = dict(conn.execute("SELECT * FROM accounts WHERE id=?", (account_id,)).fetchone())
+        dv = conn.execute("SELECT subject, body_html FROM draft_versions WHERE draft_id=? "
+                          "ORDER BY version DESC LIMIT 1", (draft_id,)).fetchone()
+        sample = {"first_name": "Seed", "last_name": "Test", "email": "",
+                  "company": "SeedCheck", "custom_1": "", "custom_2": "", "custom_3": ""}
+        subject = mailmod.render_template(dv["subject"], sample)
+        body = mailmod.render_template(dv["body_html"], sample)
+        results = []
+        for seed in seeds:
+            sample["email"] = seed["email"]
+            message_id = make_msgid(domain=account["email"].split("@")[-1])
+            msg = mailmod.build_message(account["email"], seed["email"], subject, body,
+                                        message_id,
+                                        f"{db_worker_base_url()}/u/seedtest", "",
+                                        reply_to=account["email"])
+            acct = dict(account, smtp_pass=account["smtp_pass_enc"], _enc=True)
+            ok, resp = mailmod.smtp_send(acct, msg)
+            if not ok:
+                results.append({"seed": seed["email"], "provider": seed["provider"],
+                                "placement": "missing", "folder": None,
+                                "detail": f"send failed: {resp[:120]}"})
+                continue
+            time.sleep(wait_sec)
+            try:
+                placed = mailmod.check_seed_placement(seed, message_id)
+            except Exception as e:
+                placed = {"placement": "missing", "folder": None,
+                          "detail": f"imap error: {e}"[:120]}
+            results.append({"seed": seed["email"], "provider": seed["provider"], **placed})
+        score = mailmod.placement_score(results)
+        db.tx(lambda c: c.execute(
+            "UPDATE deliverability_tests SET status='done', results=? WHERE id=?",
+            (json.dumps({"results": results, "score": score}), test_id)))
+    except Exception as e:
+        db.tx(lambda c: c.execute(
+            "UPDATE deliverability_tests SET status='error', results=? WHERE id=?",
+            (json.dumps({"error": str(e)[:300]}), test_id)))
+
+
+def db_worker_base_url():
+    row = db.get_db().execute("SELECT value FROM settings WHERE key='base_url'").fetchone()
+    return (row["value"] if row else "http://localhost:8000").rstrip("/")
+
+
+@app.post("/deliverability/test")
+def deliverability_test(request: Request, draft_id: int = Form(...),
+                        account_id: int = Form(...)):
+    tid = uuid.uuid4().hex[:12]
+    db.tx(lambda c: c.execute(
+        "INSERT INTO deliverability_tests(id, draft_id, account_id, status, created_at) VALUES(?,?,?,?,?)",
+        (tid, draft_id, account_id, "running", utcnow_s())))
+    t = threading.Thread(target=_run_deliverability_test, args=(tid, draft_id, account_id),
+                         daemon=True, name=f"seedtest-{tid}")
+    t.start()
+    return redir("/deliverability", "Placement test started — results appear below shortly.", "info")
 
 
 # ---------------- settings ----------------

@@ -211,6 +211,11 @@ def send_one(campaign, cc):
         "unsubscribe_link": unsub_url,
         "mailing_address": campaign["mailing_address"] or get_setting("physical_address", ""),
     })
+    # opt-in tracking (token doubles as the send's tracking token)
+    if int(campaign.get("open_tracking") or 0):
+        body_html = mailmod.inject_open_pixel(body_html, base_url, token)
+    if int(campaign.get("click_tracking") or 0):
+        body_html = mailmod.rewrite_links(body_html, base_url, token)
     msg = mailmod.build_message(account["email"], contact["email"], subject,
                                 body_html, message_id, unsub_url,
                                 campaign["mailing_address"] or get_setting("physical_address", ""),

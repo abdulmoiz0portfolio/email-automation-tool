@@ -60,6 +60,10 @@
   <label>Daily cap (emails/day) <input type="number" name="daily_cap" value="80" min="1" max="500" required>
     <span class="muted">Gmail default 80. Above 150 is risky — you'll see a warning.</span></label>
   <div class="grid2">
+    <label><input type="checkbox" name="open_tracking" value="1"> Enable Open Tracking <span class="tip" title="Adds an invisible 1×1 pixel to each email. Opens are recorded per send. Slightly increases spam-filter scrutiny — keep OFF for cold outreach if deliverability is critical.">?</span></label>
+    <label><input type="checkbox" name="click_tracking" value="1"> Enable Click Tracking <span class="tip" title="Rewrites links through a redirect so clicks are recorded per send.">?</span></label>
+  </div>
+  <div class="grid2">
     <label>Start date <input type="date" name="start_date" value="{{ today }}" required></label>
     <label>Physical mailing address <input type="text" name="mailing_address" value="{{ physical_address }}" placeholder="Required for the unsubscribe footer"></label>
   </div>

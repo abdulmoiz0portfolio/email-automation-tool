@@ -1,10 +1,12 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="row-between"><h1>Contact lists</h1>
-<form method="post" action="/contacts/upload" enctype="multipart/form-data" class="inline-form">
-<input type="file" name="file" accept=".xlsx,.csv" required>
-<input type="text" name="name" placeholder="List name" required>
-<button class="btn primary">Upload → map columns</button>
+<form id="uploadform" method="post" action="/contacts/upload" enctype="multipart/form-data" class="inline-form">
+<input type="file" id="fileinput" name="file" accept=".xlsx,.csv" required>
+<select id="sheetselect" name="sheet" class="hidden" title="Pick the worksheet to import"></select>
+<input type="text" id="listname" name="name" placeholder="List name" required>
+<button class="btn primary" id="uploadbtn">Upload → map columns</button>
+<span id="stagestatus" class="muted"></span>
 </form></div>
 <table><tr><th>Name</th><th>Contacts</th><th>Invalid</th><th>Uploaded</th><th></th></tr>
 {% for l in lists %}
@@ -12,4 +14,64 @@
 <td><form method="post" action="/contacts/lists/{{ l.id }}/delete" onsubmit="return confirm('Delete this list and ALL its contacts?');"><button class="btn danger small">Delete</button></form></td></tr>
 {% else %}<tr><td colspan="5" class="muted">No lists yet.</td></tr>{% endfor %}
 </table>
+{% endblock %}
+{% block scripts %}
+<script>
+const fileInput = document.getElementById('fileinput');
+const sheetSelect = document.getElementById('sheetselect');
+const statusEl = document.getElementById('stagestatus');
+const uploadForm = document.getElementById('uploadform');
+let stagedUid = null, stagedSheets = [];
+
+fileInput.addEventListener('change', async () => {
+  stagedUid = null; stagedSheets = [];
+  sheetSelect.classList.add('hidden'); sheetSelect.innerHTML = '';
+  statusEl.textContent = '';
+  const f = fileInput.files[0];
+  if (!f) return;
+  // CSV has a single sheet — no need to ask the server
+  if (/\.csv$/i.test(f.name)) return;
+  statusEl.textContent = 'Reading sheets…';
+  const fd = new FormData();
+  fd.append('file', f);
+  try {
+    const r = await fetch('/api/contacts/stage', {method: 'POST', body: fd});
+    const j = await r.json();
+    if (!r.ok) { statusEl.textContent = '⚠️ ' + (j.detail || 'could not read file'); return; }
+    stagedUid = j.uid; stagedSheets = j.sheets || [];
+    if (stagedSheets.length > 1) {
+      sheetSelect.innerHTML = stagedSheets.map(s =>
+        `<option value="${s.replace(/"/g,'&quot;')}">${s.replace(/</g,'&lt;')}</option>`).join('');
+      sheetSelect.classList.remove('hidden');
+      statusEl.textContent = `Pick a sheet (${stagedSheets.length} found)`;
+    } else {
+      statusEl.textContent = '';
+    }
+  } catch (e) {
+    statusEl.textContent = '⚠️ could not read sheets — first sheet will be used';
+  }
+});
+
+uploadForm.addEventListener('submit', async (e) => {
+  // If we staged the file and the user picked a sheet, use the staged path.
+  if (!stagedUid) return; // plain form post (active sheet) — server handles it
+  e.preventDefault();
+  const btn = document.getElementById('uploadbtn');
+  btn.disabled = true;
+  statusEl.textContent = 'Uploading sheet…';
+  const fd = new FormData();
+  fd.append('uid', stagedUid);
+  fd.append('sheet', sheetSelect.classList.contains('hidden') ? '' : sheetSelect.value);
+  fd.append('name', document.getElementById('listname').value);
+  try {
+    const r = await fetch('/contacts/upload-staged', {method: 'POST', body: fd});
+    const j = await r.json();
+    if (r.ok && j.redirect) { window.location = j.redirect; return; }
+    statusEl.textContent = '⚠️ ' + (j.detail || 'upload failed');
+  } catch (err) {
+    statusEl.textContent = '⚠️ upload failed';
+  }
+  btn.disabled = false;
+});
+</script>
 {% endblock %}

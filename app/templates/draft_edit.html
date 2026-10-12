@@ -28,6 +28,11 @@
 <div class="card"><h3>Version history</h3>
 {% if versions %}<ul>{% for v in versions %}<li>v{{ v.version }} — {{ v.created_at[:16].replace('T',' ') }}</li>{% endfor %}</ul>
 {% else %}<p class="muted">First version.</p>{% endif %}</div>
+<div class="card"><h3>Spintax variations <span class="tip" title="Spintax like {Hi|Hello|Hey} is expanded randomly per email so every send is unique. Click to see 5 random variations.">?</span></h3>
+<p class="muted">Use <code>{option1|option2}</code> in subject/body — nesting works: <code>{Hi|Hello} {{first_name}}</code>.</p>
+<button type="button" class="btn" id="varbtn">🎲 Preview random variations</button>
+<div id="variations" class="muted" style="margin-top:8px"></div>
+</div>
 </div>
 <button class="btn primary">💾 Save {{ "new version" if draft else "draft" }}</button>
 </form>
@@ -52,6 +57,13 @@ document.getElementById('subject').addEventListener('input',sync);
 editor.addEventListener('input',sync);
 document.getElementById('prev_contact').addEventListener('change',sync);
 document.querySelector('form').addEventListener('submit',()=>{document.getElementById('body_html').value=editor.innerHTML;});
+document.getElementById('varbtn').onclick=()=>{
+ fetch(`/api/drafts/preview-variations?subject=${encodeURIComponent(document.getElementById('subject').value)}&body=${encodeURIComponent(editor.innerHTML)}&n=5`)
+ .then(r=>r.json()).then(j=>{
+  document.getElementById('variations').innerHTML =
+   '<b>Subjects:</b><ul>'+j.subjects.map(s=>'<li>'+s.replace(/</g,'&lt;')+'</li>').join('')+'</ul>'+
+   '<b>Bodies:</b><ul>'+j.bodies.map(s=>'<li>'+s.replace(/</g,'&lt;').slice(0,160)+'</li>').join('')+'</ul>';});
+};
 sync();
 </script>
 {% endblock %}

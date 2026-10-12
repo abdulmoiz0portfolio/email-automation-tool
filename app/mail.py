@@ -41,9 +41,57 @@ def validate_email(raw: str):
 
 VAR_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}")
 
+# Single-brace spintax {a|b|c}, supporting nesting. The negative lookarounds
+# keep {{double-brace}} template variables untouched.
+SPINTAX_RE = re.compile(r"(?<!\{)\{([^{}]*)\}(?!\})")
 
-def render_template(text: str, contact: dict, extra: dict | None = None) -> str:
-    """Fill {{first_name}} etc. Unknown variables are left as-is."""
+
+def process_spintax(text: str, rng=None) -> str:
+    """Expand {opt1|opt2|{nested|deep}} spintax recursively. Braces without a
+    pipe are left as-is (so stray {CSS} blocks survive)."""
+    import random as _random
+    rng = rng or _random
+    if not text or "{" not in text:
+        return text or ""
+    out, protected = text, {}
+
+    def _protect(m):
+        key = f"\x00SP{len(protected)}\x00"
+        protected[key] = m.group(0)
+        return key
+
+    # hide no-pipe single-brace groups so they can't loop forever
+    out = re.sub(r"(?<!\{)\{([^{}]*)\}(?!\})",
+                 lambda m: _protect(m) if "|" not in m.group(1) else m.group(0), out)
+    for _ in range(50):  # nesting depth guard
+        m = SPINTAX_RE.search(out)
+        if not m:
+            break
+        out = out[:m.start()] + rng.choice(m.group(1).split("|")) + out[m.end():]
+    for key, val in protected.items():
+        out = out.replace(key, val)
+    return out
+
+
+def preview_variations(text: str, n: int = 5, seed: int = 0):
+    """Deterministic-ish preview: n unique-ish variations for the draft editor."""
+    import random as _random
+    seen, out = set(), []
+    for i in range(n * 4):
+        v = process_spintax(text, _random.Random(seed + i))
+        if v not in seen:
+            seen.add(v)
+            out.append(v)
+        if len(out) == n:
+            break
+    return out
+
+
+def render_template(text: str, contact: dict, extra: dict | None = None,
+                  rng=None) -> str:
+    """Fill {{first_name}} etc. Unknown variables are left as-is.
+    Spintax {a|b} is expanded first so every outgoing email is unique."""
+    text = process_spintax(text or "", rng)
     ctx = {
         "first_name": contact.get("first_name", "") or "",
         "last_name": contact.get("last_name", "") or "",
@@ -61,6 +109,45 @@ def render_template(text: str, contact: dict, extra: dict | None = None) -> str:
         return str(ctx.get(key, m.group(0)))
 
     return VAR_RE.sub(repl, text or "")
+
+
+# ---------- open / click tracking ----------
+
+PIXEL_HTML = ('<img src="{base}/t/o/{token}.png" width="1" height="1" '
+              'style="display:none" alt="">')
+
+HREF_RE = re.compile(r'''(?i)<a(\s[^>]*?)href=(["'])(.*?)\2''', re.DOTALL)
+
+
+def inject_open_pixel(body_html: str, base_url: str, token: str) -> str:
+    """Append an invisible 1x1 tracking pixel to the HTML body."""
+    pixel = PIXEL_HTML.format(base=base_url.rstrip("/"), token=token)
+    if re.search(r"(?i)</body\s*>", body_html or ""):
+        return re.sub(r"(?i)</body\s*>", pixel + "</body>", body_html, count=1)
+    return (body_html or "") + pixel
+
+
+def rewrite_links(body_html: str, base_url: str, token: str) -> str:
+    """Wrap every <a href> through the click-tracking redirect."""
+    import urllib.parse
+
+    def _wrap(m):
+        attrs, quote, url = m.group(1), m.group(2), m.group(3)
+        if not url or url.startswith(("mailto:", "#", "javascript:")):
+            return m.group(0)
+        if f"/t/c/{token}" in url:
+            return m.group(0)  # already wrapped
+        target = f"{base_url.rstrip('/')}/t/c/{token}?url={urllib.parse.quote(url, safe='')}"
+        return f"<a{attrs}href={quote}{target}{quote}"
+
+    return HREF_RE.sub(_wrap, body_html or "")
+
+
+TRANSPARENT_PNG = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDATx\x9cc\x00\x01"
+    b"\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+)
 
 
 def html_to_text(html: str) -> str:
@@ -291,6 +378,63 @@ def classify_reply(from_email: str, subject: str, body: str) -> str:
             "what does", "can you explain", "more info", "more details"]):
         return "Question"
     return "Other"
+
+
+# ---------- deliverability seed testing ----------
+
+SPAM_FOLDERS = ["[Gmail]/Spam", "Junk", "Bulk Mail", "Spam", "Junk E-Mail"]
+
+
+def _find_by_msgid(mail, mailbox: str, message_id: str) -> bool:
+    """True if a message with this Message-ID exists in the mailbox."""
+    try:
+        typ, _ = mail.select(f'"{mailbox}"', readonly=True)
+    except Exception:
+        return False
+    if typ != "ok":
+        return False
+    mid = message_id.strip().strip("<>")
+    try:
+        typ, data = mail.search(None, "HEADER", "Message-ID", mid)
+    except Exception:
+        return False
+    return typ == "ok" and bool(data) and bool(data[0])
+
+
+def check_seed_placement(seed: dict, message_id: str, timeout: int = 30):
+    """Log into a seed inbox and report where the test email landed.
+
+    Returns {"placement": "inbox"|"spam"|"missing", "folder": str|None}.
+    Pure IMAP logic — unit-testable with a fake IMAP object via monkeypatching
+    _imap_connect (it takes the same account-shaped dict)."""
+    from .crypto import decrypt
+    password = decrypt(seed["imap_pass_enc"])
+    acct = {"imap_host": seed["imap_host"], "imap_port": seed.get("imap_port", 993),
+            "imap_user": seed["imap_user"], "imap_enc": seed.get("imap_enc", "SSL")}
+    mail = _imap_connect(acct, password, timeout)
+    try:
+        if _find_by_msgid(mail, "INBOX", message_id):
+            return {"placement": "inbox", "folder": "INBOX"}
+        for folder in SPAM_FOLDERS:
+            if _find_by_msgid(mail, folder, message_id):
+                return {"placement": "spam", "folder": folder}
+        return {"placement": "missing", "folder": None}
+    finally:
+        try:
+            mail.logout()
+        except Exception:
+            pass
+
+
+def placement_score(results):
+    """results: list of {"placement": ...}. Returns dict with inbox/spam/missing %."""
+    n = len(results) or 1
+    inbox = sum(1 for r in results if r.get("placement") == "inbox")
+    spam = sum(1 for r in results if r.get("placement") == "spam")
+    return {"total": len(results),
+            "inbox_pct": round(inbox / n * 100, 1),
+            "spam_pct": round(spam / n * 100, 1),
+            "missing_pct": round((len(results) - inbox - spam) / n * 100, 1)}
 
 
 # ---------- deliverability lookups ----------

@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Deliverability <span class="tip" title="Seed testing checks where your emails actually land (Inbox vs Spam) across providers before you send to real contacts.">?</span></h1>
+
+<div class="grid2">
+<div class="card">
+<h3>Seed inboxes</h3>
+<p class="muted">Add one inbox per provider (Gmail, Outlook, Yahoo). The test sends a real email to each and checks via IMAP whether it landed in Inbox or Spam.</p>
+<form method="post" action="/seed-accounts" class="form">
+<div class="grid2">
+<label>Email <input type="email" name="email" required></label>
+<label>Provider <select name="provider"><option value="gmail">Gmail</option><option value="outlook">Outlook</option><option value="yahoo">Yahoo</option><option value="other">Other</option></select></label>
+</div>
+<div class="grid2">
+<label>IMAP host <input type="text" name="imap_host" required placeholder="imap.gmail.com"></label>
+<label>IMAP port <input type="number" name="imap_port" value="993"></label>
+</div>
+<div class="grid2">
+<label>IMAP username <input type="text" name="imap_user" required></label>
+<label>IMAP password <input type="password" name="imap_pass" required autocomplete="new-password"></label>
+</div>
+<button class="btn primary">Add seed inbox</button>
+</form>
+{% if seeds %}
+<table class="tbl"><tr><th>Email</th><th>Provider</th><th></th></tr>
+{% for s in seeds %}<tr><td>{{ s.email }}</td><td>{{ s.provider }}</td>
+<td><form method="post" action="/seed-accounts/{{ s.id }}/delete" style="display:inline"><button class="btn danger sm">Delete</button></form></td></tr>
+{% endfor %}</table>
+{% else %}<p class="muted">No seed inboxes yet.</p>{% endif %}
+</div>
+
+<div class="card">
+<h3>Run placement test</h3>
+<form method="post" action="/deliverability/test" class="form">
+<label>Draft <select name="draft_id" required>{% for d in drafts %}<option value="{{ d.id }}">{{ d.name }}</option>{% endfor %}</select></label>
+<label>Send from account <select name="account_id" required>{% for a in accounts %}<option value="{{ a.id }}">{{ a.label }} ({{ a.email }})</option>{% endfor %}</select></label>
+<button class="btn primary" {% if not seeds %}disabled{% endif %}>🧪 Send test to {{ seeds|length }} seed inbox(es)</button>
+{% if not seeds %}<p class="muted">Add at least one seed inbox first.</p>{% endif %}
+</form>
+<p class="muted">The test waits ~45s per seed for delivery, then logs into each inbox via IMAP and checks Inbox vs Spam/Junk folders.</p>
+</div>
+</div>
+
+<h2>Recent tests</h2>
+{% for t in tests %}
+<div class="card">
+<b>Test {{ t.id }}</b> — {{ t.created_at[:16].replace('T',' ') }} — status: <b>{{ t.status }}</b>
+{% if t.results_parsed and t.results_parsed.score %}
+{% set sc = t.results_parsed.score %}
+<p>📊 Inbox placement: <strong>{{ sc.inbox_pct }}%</strong> inbox · {{ sc.spam_pct }}% spam · {{ sc.missing_pct }}% missing ({{ sc.total }} seeds)</p>
+<table class="tbl"><tr><th>Seed</th><th>Provider</th><th>Placement</th><th>Detail</th></tr>
+{% for r in t.results_parsed.results %}<tr><td>{{ r.seed }}</td><td>{{ r.provider }}</td>
+<td>{% if r.placement=='inbox' %}✅ inbox{% elif r.placement=='spam' %}⚠️ spam{% else %}❌ missing{% endif %}</td>
+<td class="muted">{{ r.folder or r.detail or '' }}</td></tr>
+{% endfor %}</table>
+{% elif t.results_parsed and t.results_parsed.error %}
+<p class="err">{{ t.results_parsed.error }}</p>
+{% endif %}
+</div>
+{% else %}<p class="muted">No tests yet.</p>{% endfor %}
+{% endblock %}
